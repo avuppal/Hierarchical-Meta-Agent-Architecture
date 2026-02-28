@@ -1,4 +1,4 @@
-# Dockerfile for HMA Research Environment
+# Dockerfile for HMA Research Environment (AaaS Mode)
 # Use a stable base image with Python
 FROM python:3.11-slim
 
@@ -26,5 +26,5 @@ COPY . /app/agent_budget_research
 ENV VLLM_API_BASE="http://host.docker.internal:8000/v1"
 ENV HMA_API_BASE="http://host.docker.internal:8000/v1"
 
-# The script we want to run to start the simulation
-CMD ["python3", "agent_budget_research/hma_orchestrator.py"]
+# The command to run the FastAPI service via Uvicorn
+CMD ["uvicorn", "agent_budget_research.service:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -3,4 +3,6 @@ pydantic
 openai
 pandas
 vllm
+fastapi
+uvicorn
 pyright>=1.1.338
