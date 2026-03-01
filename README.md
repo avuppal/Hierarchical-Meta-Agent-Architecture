@@ -20,27 +20,19 @@ This system implements key industrial management theories to optimize AI Token E
     *   **Function:** Uses `asyncio.gather` to fire all tasks in a wave simultaneously.
     *   **Benefit:** Synergizes with vLLM's continuous batching to saturate 8x3090 GPUs, reducing total wall-clock time by N-fold.
 
-3.  **Dynamic Sizing (Project Management):**
+3.  **Vector Semantic Cache (Knowledge Management):**
+    *   **Theory:** Memoization & Knowledge Reuse.
+    *   **Function:** Uses **ChromaDB** to store vector embeddings of prompts. If a new request is semantically similar (e.g., "What is SSM?" vs "Define State Space Model"), it returns the cached answer instantly.
+    *   **Benefit:** Reduces redundant computation to **Zero Tokens** and **Zero Latency**.
+
+4.  **Worker Reflexion (Quality Assurance):**
+    *   **Theory:** Deming Cycle (Plan-Do-Check-Act).
+    *   **Function:** Workers execute a "Draft -> Critique -> Refine" loop internally before submitting work.
+    *   **Benefit:** Catches errors locally, preventing expensive re-work loops at the Manager level.
+
+5.  **Dynamic Sizing & Routing:**
     *   **Theory:** Complexity-Based Budgeting.
-    *   **Function:** Automatically rates task complexity (LOW/MEDIUM/HIGH) and adjusts the token budget (0.8x - 1.5x).
-    *   **Routing:** Dynamically enables **Chain-of-Thought (CoT)** for complex tasks while using fast MoE for simple ones.
-
-4.  **Poka-Yoke Worker (Quality Engineering):**
-    *   **Theory:** Mistake Proofing.
-    *   **Function:** Enforces **Strict JSON Structured Output** from worker agents.
-    *   **Benefit:** Zero-token validation (syntax check) prevents the Manager from wasting tokens reading invalid responses.
-
-## Enterprise Operations (Ops)
-
-This repository includes production-grade resilience features:
-
-1.  **Fault Tolerance:** Exponential backoff retries (via `tenacity`) for API failures.
-2.  **Rate Limiting:** `asyncio.Semaphore` prevents overloading the vLLM server.
-    *   Configure via `MAX_CONCURRENT_WORKERS` (Default: 20).
-3.  **Observability:** Prometheus metrics exported for Grafana dashboards.
-    *   `hma_tokens_total`: Total token consumption.
-    *   `hma_worker_errors_total`: Error rates.
-    *   `hma_task_duration_seconds`: Latency distribution.
+    *   **Function:** Automatically rates task complexity. Uses **Chain-of-Thought (CoT)** for high-complexity reasoning and fast **MoE (Mixture of Experts)** for standard tasks.
 
 ## Structure
 
@@ -73,7 +65,10 @@ deploy:
 ```bash
 docker-compose up --build
 ```
-This starts the vLLM Inference Server on port 8000 and the HMA Orchestrator on port 8080.
+This starts:
+*   **vLLM Inference Server** (Port 8000)
+*   **HMA Orchestrator** (Port 8080)
+*   **Prometheus Metrics** (Port 8001 internal)
 
 ### 4. Submit a Task
 ```bash
