@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  hma-service:
+    build: .
+    container_name: hma-orchestrator
+    ports:
+      - "8080:8080"
+    environment:
+      # Connect to the internal vLLM service
+      - VLLM_API_BASE=http://vllm-worker:8000/v1
+      - VLLM_API_KEY=EMPTY
+      - VLLM_MODEL_NAME=facebook/opt-125m
+      # For HMA logic, use the same model or a different one if desired
+      - HMA_API_BASE=http://vllm-worker:8000/v1
+      - HMA_API_KEY=EMPTY
+      - HMA_MODEL_NAME=facebook/opt-125m
+    depends_on:
+      - vllm-worker
+    volumes:
+      # Persist benchmark logs to host
+      - ./hma_benchmark_logs.csv:/app/hma_benchmark_logs.csv
+
+  vllm-worker:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-inference
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1 # UPDATE THIS: Use 'all' or specific number (e.g., 8) for your rig
+              capabilities: [gpu]
+    ports:
+      - "8000:8000"
+    # Benchmark with a small model by default. Change to larger models for real tests.
+    command: --model facebook/opt-125m --gpu-memory-utilization 0.90 --max-model-len 2048
+    volumes:
+      # Cache models so they don't download every restart
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ipc: host # Recommended for vLLM performance

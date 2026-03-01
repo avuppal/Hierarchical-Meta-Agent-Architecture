@@ -28,29 +28,44 @@ This system implements key industrial management theories to optimize AI Token E
 
 *   **`hma_orchestrator.py`**: The LangGraph-based engine implementing the HMA logic (Analyst -> Budget -> Execute -> Review -> Loop).
 *   **`service.py`**: FastAPI wrapper exposing the HMA as a scalable "Agent-as-a-Service" (AaaS).
-*   **`Dockerfile`**: Containerized environment with vLLM integration and OpenAI client compatibility.
+*   **`docker-compose.yml`**: Full-stack deployment (HMA Service + vLLM Worker).
 *   **`hma_benchmark_logs.csv`**: Automatically generated metrics file tracking Token ROI and Latency.
 
-## Running the Service
+## Quick Start (Docker Compose)
 
-### 1. Build
-```bash
-docker build -t hma-service .
+The easiest way to run the entire HMA cluster (Service + Worker + vLLM Inference) is with Docker Compose.
+
+### 1. Prerequisites
+*   **Docker & Docker Compose** installed.
+*   **NVIDIA Drivers & NVIDIA Container Toolkit** (for GPU support).
+
+### 2. Configure Hardware (Optional)
+Open `docker-compose.yml` and update the `vllm-worker` service to match your GPU count:
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all # Use all 8 GPUs!
+          capabilities: [gpu]
 ```
 
-### 2. Run (Connecting to vLLM)
-Ensure you have a vLLM server running (e.g., on host port 8000).
-
+### 3. Launch
 ```bash
-docker run -p 8080:8080 \
-  -e VLLM_API_BASE="http://host.docker.internal:8000/v1" \
-  -e HMA_API_BASE="http://host.docker.internal:8000/v1" \
-  hma-service
+docker-compose up --build
 ```
+This starts the vLLM Inference Server on port 8000 and the HMA Orchestrator on port 8080.
 
-### 3. Submit a Task
+### 4. Submit a Task
 ```bash
 curl -X POST "http://localhost:8080/submit" \
      -H "Content-Type: application/json" \
-     -d '{"task_description": "Explain the difference between SSM and Transformer architectures.", "total_budget_tokens": 5000}'
+     -d '{"task_description": "Analyze the token efficiency of HMA vs Flat agents.", "total_budget_tokens": 5000}'
+```
+
+### 5. Check Metrics
+View real-time efficiency logs:
+```bash
+curl "http://localhost:8080/metrics"
 ```
