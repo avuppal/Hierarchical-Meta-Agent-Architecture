@@ -27,6 +27,47 @@ except ImportError:
     from orchestrator.AgentArchitect import AgentArchitect
     from core.SessionManager import SessionManager
 
+# --- THE LIBRARIAN (RAG) ---
+DATA_DIR = "data"
+
+class LibrarianRAG:
+    def __init__(self, data_dir=DATA_DIR, db_path="hma_librarian_db"):
+        self.data_dir = data_dir
+        self.client = chromadb.PersistentClient(path=db_path)
+        self.ef = embedding_functions.DefaultEmbeddingFunction()
+        self.collection = self.client.get_or_create_collection(name="docs", embedding_function=self.ef)
+        self._ingest_data()
+
+    def _ingest_data(self):
+        if not os.path.exists(self.data_dir): return
+        print("--- [Librarian]: Indexing Documents ---")
+        for f in os.listdir(self.data_dir):
+            path = os.path.join(self.data_dir, f)
+            text = ""
+            if f.endswith(".txt") or f.endswith(".md"):
+                with open(path, "r") as file: text = file.read()
+            elif f.endswith(".pdf"):
+                try:
+                    reader = PdfReader(path)
+                    for page in reader.pages: text += page.extract_text() + "\n"
+                except: pass
+            
+            if text:
+                chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
+                ids = [f"{f}_{i}" for i in range(len(chunks))]
+                if chunks:
+                    self.collection.upsert(documents=chunks, ids=ids, metadatas=[{"source": f}] * len(chunks))
+                    print(f"  -> Indexed {f} ({len(chunks)} chunks)")
+
+    def query(self, query_text: str, n=3) -> str:
+        try:
+            results = self.collection.query(query_texts=[query_text], n_results=n)
+            if not results['documents'] or not results['documents'][0]: return "No relevant documents found."
+            return "\n---\n".join(results['documents'][0])
+        except: return "Error querying docs."
+
+librarian = LibrarianRAG()
+
 # --- Configuration Constants ---
 VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1") 
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY") 
@@ -91,6 +132,12 @@ class WorkerSignature(dspy.Signature):
     sub_task = dspy.InputField()
     context = dspy.InputField()
     response_json = dspy.OutputField()
+
+class LibrarianSignature(dspy.Signature):
+    """Answer using retrieved context."""
+    question = dspy.InputField()
+    context = dspy.InputField()
+    answer = dspy.OutputField()
 
 # --- State ---
 class GraphState(TypedDict):
@@ -174,13 +221,21 @@ async def execute_wave_tasks(state: GraphState) -> dict:
         # but logically it runs inside the SessionManager's scope.
         
         if "python" in tools or "exec" in tools:
-            # It's an engineer
-             # Simple mock for demo since we replaced the specific EngineerSignature
-            return f"[Session {session_id}] Executed code for: {task_desc}"
+            # It's an engineer - execute Python code
+            clean_code = re.sub(r'```python\s*', '', task_desc).replace('```', '')
+            try:
+                exec_result = subprocess.run([sys.executable, "-c", clean_code], capture_output=True, text=True, timeout=10)
+                return f"[Session {session_id}] Code Result: {exec_result.stdout.strip() or exec_result.stderr.strip()}"
+            except Exception as e:
+                return f"[Session {session_id}] Code Error: {e}"
         
-        elif "web_search" in tools:
-            # Research agent
-            return f"[Session {session_id}] Researched: {task_desc}"
+        elif "web_search" in tools or "research" in task_desc.lower():
+            # Research agent - query local documents
+            print(f"  -> [Librarian] Searching docs for: {task_desc}")
+            retrieved_docs = librarian.query(task_desc)
+            prog = dspy.ChainOfThought(LibrarianSignature)
+            pred = await asyncio.to_thread(prog, question=task_desc, context=retrieved_docs)
+            return f"[Session {session_id}] {pred.answer}"
             
         else:
             # General worker
