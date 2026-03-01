@@ -9,20 +9,32 @@ import hashlib
 import pandas as pd
 import asyncio
 from openai import AsyncOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 # --- Configuration Constants ---
 VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1") 
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY") 
-VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m") # Worker (MoE recommended)
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m") 
 
 HMA_API_BASE = os.getenv("HMA_API_BASE", "http://localhost:8000/v1")
 HMA_API_KEY = os.getenv("HMA_API_KEY", "EMPTY")
-HMA_MODEL_NAME = os.getenv("HMA_MODEL_NAME", "facebook/opt-125m") # Analyst (Dense/CoT recommended)
+HMA_MODEL_NAME = os.getenv("HMA_MODEL_NAME", "facebook/opt-125m") 
 
 BENCHMARK_FILE = "hma_benchmark_logs.csv"
 CACHE_FILE = "hma_semantic_cache.json"
 
-# --- 1. Benchmark Logger ---
+# Rate Limiting (Semaphore)
+MAX_CONCURRENT_WORKERS = int(os.getenv("MAX_CONCURRENT_WORKERS", "20"))
+worker_semaphore = asyncio.Semaphore(MAX_CONCURRENT_WORKERS)
+
+# --- 1. Prometheus Metrics ---
+HMA_TOKENS_TOTAL = Counter('hma_tokens_total', 'Total tokens consumed', ['model_name', 'step_type'])
+HMA_TASK_DURATION = Histogram('hma_task_duration_seconds', 'Duration of tasks in seconds', ['step_type'])
+HMA_WORKER_ERRORS = Counter('hma_worker_errors_total', 'Total worker errors', ['error_type'])
+HMA_ACTIVE_JOBS = Gauge('hma_active_jobs', 'Number of currently running jobs')
+
+# --- 2. Benchmark Logger ---
 class BenchmarkLogger:
     def __init__(self, filename=BENCHMARK_FILE):
         self.filename = filename
@@ -47,11 +59,14 @@ class BenchmarkLogger:
         }
         df = pd.DataFrame([new_row])
         df.to_csv(self.filename, mode='a', header=False, index=False)
+        # Also update Prometheus
+        HMA_TOKENS_TOTAL.labels(model_name="unknown", step_type=step_type).inc(usage.get('total_tokens', 0))
+        HMA_TASK_DURATION.labels(step_type=step_type).observe(duration_ms / 1000.0)
         print(f"  [Log] Saved metric: {step_type} ({duration_ms}ms, {usage.get('total_tokens', 0)} tokens)")
 
 logger = BenchmarkLogger()
 
-# --- 2. Semantic Cache ---
+# --- 3. Semantic Cache ---
 class SemanticCache:
     def __init__(self, filename=CACHE_FILE):
         self.filename = filename
@@ -73,19 +88,16 @@ class SemanticCache:
 
 semantic_cache = SemanticCache()
 
-# --- 3. Define State Schema ---
+# --- 4. State Schema ---
 class AgentBudgetState(BaseModel):
     task_description: str
     total_budget_tokens: int
     
-    # Wave Planning State
-    task_waves: List[List[str]] = Field(default_factory=list, description="Ordered list of parallel task groups")
-    current_wave_index: int = Field(default=0, description="Current wave being executed")
-    
+    task_waves: List[List[str]] = Field(default_factory=list)
+    current_wave_index: int = 0
     complexity_score: str = "MEDIUM"
     
-    # Execution State
-    worker_outputs: Dict[str, str] = Field(default_factory=dict, description="Map of sub-task -> output")
+    worker_outputs: Dict[str, str] = Field(default_factory=dict)
     tokens_spent: int = 0
     worker_status: str = "IDLE"
     meta_review: str = ""
@@ -103,49 +115,60 @@ class GraphState(TypedDict):
     meta_review: str
     successful: bool
 
-# --- 4. Async Helpers ---
+# --- 5. Robust Async Helpers ---
+@retry(
+    stop=stop_after_attempt(3), 
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception)
+)
 async def call_llm_async(api_base, api_key, model, prompt, system_prompt="You are a helpful assistant."):
+    """Robust Async helper with Retry, Cache, and Semaphore."""
+    
     cache_key = hashlib.sha256(f"{model}:{system_prompt}:{prompt}".encode()).hexdigest()
     cached = semantic_cache.get(cache_key)
     if cached:
         print(f"  [Cache Hit] Serving response from {CACHE_FILE}")
         return cached['content'], cached['usage'], 0.0 
     
-    client = AsyncOpenAI(base_url=api_base, api_key=api_key)
-    start_time = time.time()
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=500
-        )
-        duration = (time.time() - start_time) * 1000
-        content = response.choices[0].message.content
-        usage = response.usage.model_dump()
-        semantic_cache.set(cache_key, {'content': content, 'usage': usage})
-        return content, usage, duration
-    except Exception as e:
-        print(f"API Error: {e}")
-        return f"Error: {str(e)}", {"total_tokens": 0}, 0
+    # Use Semaphore for Rate Limiting
+    async with worker_semaphore:
+        client = AsyncOpenAI(base_url=api_base, api_key=api_key)
+        start_time = time.time()
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=500
+            )
+            duration = (time.time() - start_time) * 1000
+            content = response.choices[0].message.content
+            usage = response.usage.model_dump()
+            semantic_cache.set(cache_key, {'content': content, 'usage': usage})
+            
+            return content, usage, duration
+        except Exception as e:
+            print(f"API Error (Retrying): {e}")
+            HMA_WORKER_ERRORS.labels(error_type=type(e).__name__).inc()
+            raise e # Trigger Retry
 
 def extract_json(text: str) -> dict:
     try: return json.loads(text)
     except:
-        match = re.search(r'```json\s*(\\{.*?\\})\\s*```', text, re.DOTALL)
-        if match: return json.loads(match.group(1))\n        match = re.search(r'(\\{.*\\})', text, re.DOTALL)
+        match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match: return json.loads(match.group(1))
+        match = re.search(r'(\{.*\})', text, re.DOTALL)
         if match: 
             try: return json.loads(match.group(1))
             except: pass
     return {}
 
-# --- 5. Node Functions ---
+# --- 6. Node Functions ---
 
 async def analyst_wave_planner(state: GraphState) -> dict:
-    """Plans the execution waves based on dependencies."""
     print("--- [Analyst Node]: Planning Task Waves ---")
     raw_task = state['task_description']
     
@@ -168,16 +191,23 @@ async def analyst_wave_planner(state: GraphState) -> dict:
     }}
     """
     
-    content, usage, duration = await call_llm_async(
-        HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME, 
-        prompt=prompt,
-        system_prompt="You are a precise technical analyst."
-    )
-    logger.log("ANALYST_PLANNING", duration, usage, "SUCCESS", content)
-    
-    data = extract_json(content)
-    waves = data.get("waves", [[raw_task]]) 
-    complexity = data.get("complexity", "MEDIUM")
+    try:
+        content, usage, duration = await call_llm_async(
+            HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME, 
+            prompt=prompt,
+            system_prompt="You are a precise technical analyst."
+        )
+        logger.log("ANALYST_PLANNING", duration, usage, "SUCCESS", content)
+        
+        data = extract_json(content)
+        waves = data.get("waves", [[raw_task]]) 
+        complexity = data.get("complexity", "MEDIUM")
+    except Exception as e:
+        # Fallback if Analyst fails completely
+        print(f"Analyst Failed: {e}. Fallback to single task.")
+        waves = [[raw_task]]
+        complexity = "MEDIUM"
+        usage = {'total_tokens': 0}
     
     print(f"Analyst Plan: {len(waves)} Waves. Complexity: {complexity}")
     
@@ -194,7 +224,6 @@ async def analyst_wave_planner(state: GraphState) -> dict:
     }
 
 async def dispatch_wave(state: GraphState) -> dict:
-    """Router: Checks if there are waves left to run."""
     if state['current_wave_index'] >= len(state['task_waves']):
         return {"worker_status": "COMPLETE"} 
     
@@ -203,10 +232,8 @@ async def dispatch_wave(state: GraphState) -> dict:
     return {"worker_status": "EXECUTING_WAVE"}
 
 async def execute_wave_tasks(state: GraphState) -> dict:
-    """Executes all tasks in the current wave in PARALLEL via asyncio.gather."""
     current_wave = state['task_waves'][state['current_wave_index']]
     
-    # Prepare Tasks for asyncio.gather
     async_tasks = []
     task_names = []
 
@@ -237,95 +264,10 @@ async def execute_wave_tasks(state: GraphState) -> dict:
             system_prompt="You are a precise Worker Agent."
         ))
     
-    # FIRE ALL AT ONCE (True Parallelism)
     print(f"  -> Firing {len(async_tasks)} concurrent requests to vLLM...")
-    results = await asyncio.gather(*async_tasks)
+    # Use gather with return_exceptions=True to prevent one failure from crashing the batch
+    results = await asyncio.gather(*async_tasks, return_exceptions=True)
     
-    outputs = {}
-    total_cost = 0
-    
-    for i, (content, usage, duration) in enumerate(results):
-        task_name = task_names[i]
-        data = extract_json(content)
-        final_output = data.get("content", content)
-        outputs[task_name] = final_output
-        total_cost += usage.get('total_tokens', 0)
-        logger.log("WORKER_EXECUTION", duration, usage, "SUCCESS", content)
-
-    print(f"Wave {state['current_wave_index'] + 1} Complete. Cost: {total_cost} tokens.")
-    
-    return {
-        "worker_outputs": {**state.get('worker_outputs', {}), **outputs},
-        "tokens_spent": state['tokens_spent'] + total_cost,
-        "current_wave_index": state['current_wave_index'] + 1,
-        "worker_status": "READY_TO_DISPATCH"
-    }
-
-async def final_review(state: GraphState) -> dict:
-    """Synthesizes all outputs."""
-    print("--- [HMA Controller]: Final Review & Synthesis ---")
-    
-    all_work = json.dumps(state['worker_outputs'], indent=2)
-    prompt = f"""
-    You are the Meta-Agent Manager.
-    Original Goal: {state['task_description']}
-    Completed Work:
-    {all_work}
-    
-    Synthesize this into a final report.
-    """
-    
-    content, usage, duration = await call_llm_async(
-        HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME,
-        prompt=prompt,
-        system_prompt="You are a strict Project Manager."
-    )
-    logger.log("HMA_FINAL_REVIEW", duration, usage, "SUCCESS", content)
-    
-    return {
-        "meta_review": content,
-        "tokens_spent": state['tokens_spent'] + usage.get('total_tokens', 0),
-        "successful": True
-    }
-
-# --- 6. Build the Graph ---
-workflow = StateGraph(GraphState)
-
-workflow.add_node("analyst_wave_planner", analyst_wave_planner)
-workflow.add_node("dispatch_wave", dispatch_wave)
-workflow.add_node("execute_wave_tasks", execute_wave_tasks)
-workflow.add_node("final_review", final_review)
-
-workflow.set_entry_point("analyst_wave_planner")
-workflow.add_edge("analyst_wave_planner", "dispatch_wave")
-
-workflow.add_conditional_edges(
-    "dispatch_wave",
-    lambda state: state['worker_status'],
-    {
-        "EXECUTING_WAVE": "execute_wave_tasks",
-        "COMPLETE": "final_review"
-    }
-)
-
-workflow.add_edge("execute_wave_tasks", "dispatch_wave") 
-workflow.add_edge("final_review", END)
-
-app = workflow.compile()
-
-if __name__ == "__main__":
-    print(f"Starting HMA Wave Benchmark.")
-    initial_state = {
-        "task_description": "Compare SSM vs Transformer architectures. Cover: 1. Theory, 2. Performance, 3. Use Cases.",
-        "total_budget_tokens": 5000, 
-    }
-    
-    async def main():
-        config = {"configurable": {"recursion_limit": 20}}
-        try:
-            async for step in app.astream(initial_state, config=config):
-                for key in step: print(f"  -> Finished Node: {key}")
-        except Exception as e:
-            print(f"Graph Execution Failed: {e}")
-            
-    asyncio.run(main())
+    outputs = {}\n    total_cost = 0\n    \n    for i, result in enumerate(results):\n        task_name = task_names[i]\n        if isinstance(result, Exception):\n            print(f\"Worker Failed for {task_name}: {result}\")\n            outputs[task_name] = f\"ERROR: {str(result)}\"\n            HMA_WORKER_ERRORS.labels(error_type=\"TaskFailure\").inc()\n            continue\n            \n        content, usage, duration = result\n        data = extract_json(content)\n        final_output = data.get(\"content\", content)\n        outputs[task_name] = final_output\n        total_cost += usage.get('total_tokens', 0)\n        logger.log(\"WORKER_EXECUTION\", duration, usage, \"SUCCESS\", content)\n\n    print(f\"Wave {state['current_wave_index'] + 1} Complete. Cost: {total_cost} tokens.\")\n    \n    return {\n        \"worker_outputs\": {**state.get('worker_outputs', {}), **outputs},\n        \"tokens_spent\": state['tokens_spent'] + total_cost,\n        \"current_wave_index\": state['current_wave_index'] + 1,\n        \"worker_status\": \"READY_TO_DISPATCH\"\n    }\n\nasync def final_review(state: GraphState) -> dict:\n    print(\"--- [HMA Controller]: Final Review & Synthesis ---\")\n    \n    all_work = json.dumps(state['worker_outputs'], indent=2)\n    prompt = f\"\"\"\n    You are the Meta-Agent Manager.\n    Original Goal: {state['task_description']}\n    Completed Work:\n    {all_work}\n    \n    Synthesize this into a final report.\n    \"\"\"\n    \n    try:\n        content, usage, duration = await call_llm_async(\n            HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME,\n            prompt=prompt,\n            system_prompt=\"You are a strict Project Manager.\"\n        )\n        logger.log(\"HMA_FINAL_REVIEW\", duration, usage, \"SUCCESS\", content)\n        return {\n            \"meta_review\": content,\n            \"tokens_spent\": state['tokens_spent'] + usage.get('total_tokens', 0),\n            \"successful\": True\n        }\n    except Exception as e:\n        print(f\"Final Review Failed: {e}\")\n        return {\"meta_review\": \"Synthesis Failed\", \"successful\": False}\n\n# --- 7. Build the Graph ---\nworkflow = StateGraph(GraphState)\n\nworkflow.add_node(\"analyst_wave_planner\", analyst_wave_planner)\nworkflow.add_node(\"dispatch_wave\", dispatch_wave)\nworkflow.add_node(\"execute_wave_tasks\", execute_wave_tasks)\nworkflow.add_node(\"final_review\", final_review)\n\nworkflow.set_entry_point(\"analyst_wave_planner\")\nworkflow.add_edge(\"analyst_wave_planner\", \"dispatch_wave\")\n\nworkflow.add_conditional_edges(\n    \"dispatch_wave\",\n    lambda state: state['worker_status'],\n    {\n        \"EXECUTING_WAVE\": \"execute_wave_tasks\",\n        \"COMPLETE\": \"final_review\"\n    }\n)\n\nworkflow.add_edge(\"execute_wave_tasks\", \"dispatch_wave\") \nworkflow.add_edge(\"final_review\", END)\n\napp = workflow.compile()\n\nif __name__ == \"__main__\":\n    print(f\"Starting HMA Enterprise Benchmark.\")\n    initial_state = {\n        \"task_description\": \"Compare SSM vs Transformer architectures.\",\n        \"total_budget_tokens\": 5000, \n    }\n    \n    async def main():\n        # Start Prometheus metrics server for local testing\n        # start_http_server(8001) \n        \n        config = {\"configurable\": {\"recursion_limit\": 20}}\n        try:\n            async for step in app.astream(initial_state, config=config):\n                for key in step: print(f\"  -> Finished Node: {key}\")\n        except Exception as e:\n            print(f\"Graph Execution Failed: {e}\")\n            \n    asyncio.run(main())",
+  "file_path": "agent_budget_research/hma_orchestrator.py"
+}. Do not mimic this format - use proper function calling.]

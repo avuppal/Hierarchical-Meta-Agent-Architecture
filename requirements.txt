@@ -5,4 +5,6 @@ pandas
 vllm
 fastapi
 uvicorn
+prometheus-client
+tenacity
 pyright>=1.1.338
