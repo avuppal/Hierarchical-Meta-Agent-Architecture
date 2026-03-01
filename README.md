@@ -2,7 +2,7 @@
 
 The next-generation infrastructure for **Token-Efficient, Latency-Optimized Agent Swarms**.
 
-This repository implements the **Human-Machine Architecture (HMA)**, a modular system designed to separate execution from cognition, enabling dynamic swarm composition, just-in-time skill loading, and massive parallel execution.
+This repository implements the **Hierarchical Meta-Agent Architecture (HMA)**, a modular system designed to separate execution from cognition, enabling dynamic swarm composition, just-in-time skill loading, and massive parallel execution.
 
 ---
 
