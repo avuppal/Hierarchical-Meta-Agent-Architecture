@@ -5,6 +5,7 @@ import json
 import re
 import os
 import time
+import hashlib
 import pandas as pd
 from openai import OpenAI
 
@@ -21,6 +22,7 @@ HMA_MODEL_NAME = os.getenv("HMA_MODEL_NAME", "facebook/opt-125m")
 
 # Benchmark Logging
 BENCHMARK_FILE = "hma_benchmark_logs.csv"
+CACHE_FILE = "hma_semantic_cache.json"
 
 # --- 1. Benchmark Logger ---
 class BenchmarkLogger:
@@ -53,7 +55,30 @@ class BenchmarkLogger:
 
 logger = BenchmarkLogger()
 
-# --- 2. Define State Schema ---
+# --- 2. Semantic Cache (KM Layer) ---
+class SemanticCache:
+    def __init__(self, filename=CACHE_FILE):
+        self.filename = filename
+        self.cache = {}
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    self.cache = json.load(f)
+            except:
+                self.cache = {}
+
+    def get(self, key: str) -> Optional[dict]:
+        return self.cache.get(key)
+
+    def set(self, key: str, value: dict):
+        self.cache[key] = value
+        # Write-through (simple consistency)
+        with open(self.filename, 'w') as f:
+            json.dump(self.cache, f, indent=2)
+
+semantic_cache = SemanticCache()
+
+# --- 3. Define State Schema ---
 class AgentBudgetState(BaseModel):
     # Input State
     task_description: str = Field(description="The overall goal for the agents.")
@@ -62,6 +87,9 @@ class AgentBudgetState(BaseModel):
     # Enhanced State (Analyst Node)
     refined_task: str = Field(default="", description="Optimized technical brief")
     complexity_score: str = Field(default="MEDIUM", description="LOW/MEDIUM/HIGH")
+
+    # Coordination (Blackboard Pattern)
+    claimed_tasks: list[str] = Field(default_factory=list, description="List of sub-tasks currently being worked on")
 
     # Runtime State
     tokens_spent: int = Field(default=0, description="Accumulated tokens spent so far.")
@@ -76,17 +104,29 @@ class GraphState(TypedDict):
     total_budget_tokens: int
     refined_task: str
     complexity_score: str
+    claimed_tasks: list[str]
     tokens_spent: int
     worker_status: str
     worker_output: str
     meta_review: str
     successful: bool
 
-# --- 3. Helpers ---
+# --- 4. Helpers ---
 def call_llm(api_base, api_key, model, prompt, system_prompt="You are a helpful assistant."):
-    """Generic helper to call an OpenAI-compatible endpoint (vLLM/TGI/OpenAI)."""
-    client = OpenAI(base_url=api_base, api_key=api_key)
+    """Generic helper with Semantic Caching."""
     
+    # Generate Cache Key (Hash of inputs)
+    cache_key = hashlib.sha256(f"{model}:{system_prompt}:{prompt}".encode()).hexdigest()
+    
+    # 1. Check Cache
+    cached = semantic_cache.get(cache_key)
+    if cached:
+        print(f"  [Cache Hit] Serving response from {CACHE_FILE}")
+        # Return cached content with 0 duration
+        return cached['content'], cached['usage'], 0.0 
+    
+    # 2. Call API (Cache Miss)
+    client = OpenAI(base_url=api_base, api_key=api_key)
     start_time = time.time()
     try:
         response = client.chat.completions.create(
@@ -102,6 +142,12 @@ def call_llm(api_base, api_key, model, prompt, system_prompt="You are a helpful 
         
         content = response.choices[0].message.content
         usage = response.usage.model_dump() # dict: prompt_tokens, completion_tokens, total_tokens
+        
+        # 3. Store in Cache
+        semantic_cache.set(cache_key, {
+            'content': content,
+            'usage': usage
+        })
         
         return content, usage, duration
     except Exception as e:
@@ -126,7 +172,7 @@ def extract_json(text: str) -> dict:
                 pass
     return {}
 
-# --- 4. Define Node Functions ---
+# --- 5. Define Node Functions ---
 
 def analyst_sizing_heuristic(state: GraphState) -> dict:
     """Refines the task and estimates complexity (Sizing)."""
@@ -194,10 +240,10 @@ def budget_check(state: GraphState) -> dict:
     remaining = state['total_budget_tokens'] - state['tokens_spent']
     
     if remaining < 500: 
-        print(f"Budget critical! Remaining: {remaining} tokens.\")
+        print(f"Budget critical! Remaining: {remaining} tokens.")
         return {"worker_status": "HALT_BUDGET_EXCEEDED"}
     
-    print(f"Budget OK. Remaining: {remaining} tokens.\")
+    print(f"Budget OK. Remaining: {remaining} tokens.")
     return {"worker_status": "READY_TO_EXECUTE"}
 
 def execute_worker_step(state: GraphState) -> dict:
@@ -206,7 +252,10 @@ def execute_worker_step(state: GraphState) -> dict:
     
     task_to_use = state.get('refined_task') or state['task_description']
     
-    # Strict Schema Prompt (Poka-Yoke)
+    # Blackboard Pattern Check (Future Proofing)
+    claimed = state.get('claimed_tasks', [])
+    # In a parallel version, we would verify task_to_use isn't in claimed here.
+    
     prompt = f"""
     Task: {task_to_use}
     Previous Output: {state.get('worker_output', 'None')}
@@ -256,7 +305,8 @@ def execute_worker_step(state: GraphState) -> dict:
     return {
         "tokens_spent": new_spent,
         "worker_output": final_output,
-        "worker_status": status
+        "worker_status": status,
+        "claimed_tasks": claimed + [task_to_use[:20]] # Mark as worked on
     }
 
 def review_and_decide_by_hma(state: GraphState) -> dict:
