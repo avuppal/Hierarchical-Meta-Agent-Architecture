@@ -20,12 +20,18 @@ from pypdf import PdfReader
 # --- New Modular HMA Imports ---
 try:
     from orchestrator.AgentArchitect import AgentArchitect
+    from orchestrator.ForecastingEngine import forecasting_engine
     from core.SessionManager import SessionManager
+    from core.QueueManager import queue_manager
+    from core.BottleneckDetector import bottleneck_detector
 except ImportError:
     # Fallback for when running without the full package structure
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from orchestrator.AgentArchitect import AgentArchitect
+    from orchestrator.ForecastingEngine import forecasting_engine
     from core.SessionManager import SessionManager
+    from core.QueueManager import queue_manager
+    from core.BottleneckDetector import bottleneck_detector
 
 # --- THE LIBRARIAN (RAG) ---
 DATA_DIR = "data"
@@ -163,13 +169,20 @@ async def analyst_wave_planner(state: GraphState) -> dict:
         return cached
 
     start = time.time()
-    
+
+    # NEW: Use ForecastingEngine to predict cost before planning
+    predicted_cost = forecasting_engine.forecast_cost(state['task_description'])
+    print(f"[ARCHITECT] Predicted cost: {predicted_cost} tokens")
+
     # NEW: Use the Modular AgentArchitect
     architect = AgentArchitect()
     swarm_plan = architect.design_swarm(state['task_description'])
-    
+
     duration = (time.time() - start) * 1000
     logger.log("ARCHITECT", duration, "SUCCESS")
+
+    # Update forecasting with actual duration
+    forecasting_engine.update_history("architect", duration, "SUCCESS")
     
     # Convert Swarm Plan to "Waves" format for compatibility with existing graph
     # The Architect returns {"strategy": "parallel", "agents": [...]}
@@ -209,40 +222,52 @@ async def execute_wave_tasks(state: GraphState) -> dict:
     # In a real deployed version, SessionManager might handle async internally or via API
     
     async def run_agent_task(agent_def):
+        start_time = time.time()
         role = agent_def.get("role", "worker")
         task_desc = agent_def.get("description")
         tools = agent_def.get("tools")
-        
+
         # Spawn the session (Virtual)
         session_id = session_manager.spawn(role, task_desc, tools=tools)
-        
-        # Execute (Simulated for now, would be an API call to the agent)
-        # Here we still use the local DSPy worker for the "thinking" part, 
-        # but logically it runs inside the SessionManager's scope.
-        
-        if "python" in tools or "exec" in tools:
-            # It's an engineer - execute Python code
-            clean_code = re.sub(r'```python\s*', '', task_desc).replace('```', '')
-            try:
+
+        try:
+            # Execute (Simulated for now, would be an API call to the agent)
+            # Here we still use the local DSPy worker for the "thinking" part,
+            # but logically it runs inside the SessionManager's scope.
+
+            if "python" in tools or "exec" in tools:
+                # It's an engineer - execute Python code
+                clean_code = re.sub(r'```python\s*', '', task_desc).replace('```', '')
                 exec_result = subprocess.run([sys.executable, "-c", clean_code], capture_output=True, text=True, timeout=10)
-                return f"[Session {session_id}] Code Result: {exec_result.stdout.strip() or exec_result.stderr.strip()}"
-            except Exception as e:
-                return f"[Session {session_id}] Code Error: {e}"
-        
-        elif "web_search" in tools or "research" in task_desc.lower():
-            # Research agent - query local documents
-            print(f"  -> [Librarian] Searching docs for: {task_desc}")
-            retrieved_docs = librarian.query(task_desc)
-            prog = dspy.ChainOfThought(LibrarianSignature)
-            pred = await asyncio.to_thread(prog, question=task_desc, context=retrieved_docs)
-            return f"[Session {session_id}] {pred.answer}"
-            
-        else:
-            # General worker
-            prog = dspy.ChainOfThought(WorkerSignature)
-            # We run this in a thread to keep it async
-            pred = await asyncio.to_thread(prog, sub_task=task_desc, context=str(state.get('worker_outputs', {})))
-            return f"[Session {session_id}] {pred.response_json}"
+                result = f"[Session {session_id}] Code Result: {exec_result.stdout.strip() or exec_result.stderr.strip()}"
+
+            elif "web_search" in tools or "research" in task_desc.lower():
+                # Research agent - query local documents
+                print(f"  -> [Librarian] Searching docs for: {task_desc}")
+                retrieved_docs = librarian.query(task_desc)
+                prog = dspy.ChainOfThought(LibrarianSignature)
+                pred = await asyncio.to_thread(prog, question=task_desc, context=retrieved_docs)
+                result = f"[Session {session_id}] {pred.answer}"
+
+            else:
+                # General worker
+                prog = dspy.ChainOfThought(WorkerSignature)
+                # We run this in a thread to keep it async
+                pred = await asyncio.to_thread(prog, sub_task=task_desc, context=str(state.get('worker_outputs', {})))
+                result = f"[Session {session_id}] {pred.response_json}"
+
+            # Log execution time for bottleneck detection
+            exec_time = time.time() - start_time
+            bottleneck_detector.log_execution(role, exec_time)
+
+            return result
+
+        except Exception as e:
+            # Handle failure with resilience
+            session_manager.handle_failure(session_id)
+            exec_time = time.time() - start_time
+            bottleneck_detector.log_execution(role, exec_time)
+            return f"[Session {session_id}] Error: {e}"
 
     tasks = [run_agent_task(agent) for agent in current_wave]
     results = await asyncio.gather(*tasks, return_exceptions=True)
