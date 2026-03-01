@@ -296,10 +296,11 @@ async def execute_wave_tasks(state: GraphState) -> dict:
         
         if task_type == "CODE":
             prompt = f"""
-            Task: {description}
-            Context: {context_str}
-            
-            Write a Python script to solve this. 
+            Global Objective: {state['task_description']}
+            Current Sub-Task: {description}
+            Context from previous steps: {context_str}
+
+            Write a Python script to solve this.
             OUTPUT FORMAT: STRICT JSON ONLY.
             {{
                 "code": "print('hello')",
@@ -312,8 +313,9 @@ async def execute_wave_tasks(state: GraphState) -> dict:
             use_cot = state['complexity_score'] == "HIGH"
             instruction = "Think step-by-step." if use_cot else "Be concise."
             prompt = f"""
-            Task: {description}
-            Context: {context_str}
+            Global Objective: {state['task_description']}
+            Current Sub-Task: {description}
+            Context from previous steps: {context_str}
             Instruction: {instruction} Draft, critique, and refine.
             OUTPUT FORMAT: STRICT JSON ONLY.
             {{
