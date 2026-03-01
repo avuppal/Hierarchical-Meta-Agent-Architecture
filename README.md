@@ -4,39 +4,38 @@ This repository contains the research codebase for testing the efficiency of **H
 
 ## Hypothesis
 
-> For a fixed computational budget (time/energy), the overall efficiency (quality of final output per unit of cost) of a multi-agent system will be maximized by introducing a **Hierarchical Meta-Agent** whose primary function is **Dynamic Resource Budgeting** and **Interruption Synthesis**, rather than just task decomposition.
+> For a fixed computational budget (time/energy), the overall efficiency (quality of final output per unit of cost) of a multi-agent system will be maximized by introducing a **Hierarchical Meta-Agent** whose primary function is **Dynamic Resource Budgeting**, **Interruption Synthesis**, and **Tool Creation**, rather than just task decomposition.
 
 ## Architecture & Management Theory
 
 This system implements key industrial management theories to optimize AI Token Efficiency:
 
-1.  **Analyst Node (Context Compression):**
+1.  **Analyst Node (Context Compression & Planning):**
     *   **Theory:** MECE (Mutually Exclusive, Collectively Exhaustive).
-    *   **Function:** Rewrites verbose user prompts into strict technical briefs and plans **Parallel Execution Waves** (Dependency-Aware DAG).
-    *   **Benefit:** Reduces noise and hallucination risk for downstream workers.
+    *   **Function:** Rewrites user prompts into strict technical briefs and plans **Parallel Execution Waves** (Dependency-Aware DAG).
+    *   **Benefit:** Reduces noise and plans optimal parallel routes.
 
-2.  **Parallel Execution Engine (HPC Optimization):**
-    *   **Theory:** Amdahl's Law & Batch Processing.
-    *   **Function:** Uses `asyncio.gather` to fire all tasks in a wave simultaneously.
-    *   **Benefit:** Synergizes with vLLM's continuous batching to saturate 8x3090 GPUs, reducing total wall-clock time by N-fold.
+2.  **The Engineer (Dynamic Tool Creation):**
+    *   **Theory:** Make vs. Buy Decision.
+    *   **Function:** Automatically detects computational tasks (Math/Data) and writes/executes **Python Code** in a sandbox instead of using LLM reasoning.
+    *   **Benefit:** 100x efficiency for math/logic. Solves problems the model cannot hallucinate through.
 
-3.  **Vector Semantic Cache (Knowledge Management):**
-    *   **Theory:** Memoization & Knowledge Reuse.
-    *   **Function:** Uses **ChromaDB** to store vector embeddings of prompts. If a new request is semantically similar (e.g., "What is SSM?" vs "Define State Space Model"), it returns the cached answer instantly.
-    *   **Benefit:** Reduces redundant computation to **Zero Tokens** and **Zero Latency**.
+3.  **Vector Semantic Cache (Collective Memory):**
+    *   **Theory:** Knowledge Management (KM).
+    *   **Function:** Uses **ChromaDB** to store vector embeddings of *every* sub-agent prompt and result.
+    *   **Benefit:** "Skill Acquisition." If an agent solves a problem once, the solution is memorized forever. Subsequent similar requests cost **Zero Tokens**.
 
-4.  **Worker Reflexion (Quality Assurance):**
-    *   **Theory:** Deming Cycle (Plan-Do-Check-Act).
-    *   **Function:** Workers execute a "Draft -> Critique -> Refine" loop internally before submitting work.
-    *   **Benefit:** Catches errors locally, preventing expensive re-work loops at the Manager level.
+4.  **Parallel Execution Engine (HPC Optimization):**
+    *   **Theory:** Amdahl's Law.
+    *   **Function:** Uses `asyncio.gather` to fire all tasks in a wave simultaneously, leveraging vLLM's continuous batching on 8x GPUs.
 
-5.  **Dynamic Sizing & Routing:**
-    *   **Theory:** Complexity-Based Budgeting.
-    *   **Function:** Automatically rates task complexity. Uses **Chain-of-Thought (CoT)** for high-complexity reasoning and fast **MoE (Mixture of Experts)** for standard tasks.
+5.  **Reflexion & Poka-Yoke:**
+    *   **Theory:** Quality Engineering.
+    *   **Function:** Workers self-correct (Draft -> Critique -> Refine) and output strictly validated JSON.
 
 ## Structure
 
-*   **`hma_orchestrator.py`**: The Async LangGraph engine implementing the HMA logic (Analyst -> Parallel Waves -> Reduce -> Loop).
+*   **`hma_orchestrator.py`**: The Async LangGraph engine implementing the HMA logic (Analyst -> Parallel Waves -> Engineer/Worker -> Reduce).
 *   **`service.py`**: FastAPI wrapper exposing the HMA as a scalable "Agent-as-a-Service" (AaaS).
 *   **`docker-compose.yml`**: Full-stack deployment (HMA Service + vLLM Worker).
 *   **`hma_benchmark_logs.csv`**: Automatically generated metrics file tracking Token ROI and Latency.
@@ -74,7 +73,7 @@ This starts:
 ```bash
 curl -X POST "http://localhost:8080/submit" \
      -H "Content-Type: application/json" \
-     -d '{"task_description": "Analyze the token efficiency of HMA vs Flat agents.", "total_budget_tokens": 5000}'
+     -d '{"task_description": "Calculate the sum of the first 100 prime numbers using Python.", "total_budget_tokens": 5000}'
 ```
 
 ### 5. Check Metrics
