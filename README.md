@@ -12,21 +12,27 @@ This system implements key industrial management theories to optimize AI Token E
 
 1.  **Analyst Node (Context Compression):**
     *   **Theory:** MECE (Mutually Exclusive, Collectively Exhaustive).
-    *   **Function:** Rewrites verbose user prompts into strict technical briefs *before* any expensive work begins.
+    *   **Function:** Rewrites verbose user prompts into strict technical briefs and plans **Parallel Execution Waves** (Dependency-Aware DAG).
     *   **Benefit:** Reduces noise and hallucination risk for downstream workers.
 
-2.  **Dynamic Sizing (Project Management):**
-    *   **Theory:** Complexity-Based Budgeting.
-    *   **Function:** Automatically rates task complexity (LOW/MEDIUM/HIGH) and adjusts the token budget (0.8x - 1.5x) to prevent waste on simple tasks and starvation on complex ones.
+2.  **Parallel Execution Engine (HPC Optimization):**
+    *   **Theory:** Amdahl's Law & Batch Processing.
+    *   **Function:** Uses `asyncio.gather` to fire all tasks in a wave simultaneously.
+    *   **Benefit:** Synergizes with vLLM's continuous batching to saturate 8x3090 GPUs, reducing total wall-clock time by N-fold.
 
-3.  **Poka-Yoke Worker (Quality Engineering):**
+3.  **Dynamic Sizing (Project Management):**
+    *   **Theory:** Complexity-Based Budgeting.
+    *   **Function:** Automatically rates task complexity (LOW/MEDIUM/HIGH) and adjusts the token budget (0.8x - 1.5x).
+    *   **Routing:** Dynamically enables **Chain-of-Thought (CoT)** for complex tasks while using fast MoE for simple ones.
+
+4.  **Poka-Yoke Worker (Quality Engineering):**
     *   **Theory:** Mistake Proofing.
     *   **Function:** Enforces **Strict JSON Structured Output** from worker agents.
-    *   **Benefit:** Zero-token validation (syntax check) prevents the Manager from wasting tokens reading invalid or malformed responses.
+    *   **Benefit:** Zero-token validation (syntax check) prevents the Manager from wasting tokens reading invalid responses.
 
 ## Structure
 
-*   **`hma_orchestrator.py`**: The LangGraph-based engine implementing the HMA logic (Analyst -> Budget -> Execute -> Review -> Loop).
+*   **`hma_orchestrator.py`**: The Async LangGraph engine implementing the HMA logic (Analyst -> Parallel Waves -> Reduce -> Loop).
 *   **`service.py`**: FastAPI wrapper exposing the HMA as a scalable "Agent-as-a-Service" (AaaS).
 *   **`docker-compose.yml`**: Full-stack deployment (HMA Service + vLLM Worker).
 *   **`hma_benchmark_logs.csv`**: Automatically generated metrics file tracking Token ROI and Latency.
