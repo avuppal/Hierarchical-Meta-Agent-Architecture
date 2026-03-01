@@ -39,6 +39,10 @@ This repository implements the **Hierarchical Meta-Agent Architecture (HMA)**, a
 *   **What it does:** `SecurityManager` prevents prompt injection/DDoS; `HITLManager` pauses for approval on critical tasks.
 *   **Benefit:** Maintains safety and quality without sacrificing efficiency—lightweight checks add minimal overhead.
 
+### 8. Dynamic Model Selection (Privacy-Focused)
+*   **What it does:** `ModelSelector` chooses optimal open-source models (e.g., Llama-3 variants) based on task complexity and cost.
+*   **Benefit:** Balances performance with energy/cost; keeps data private (no API calls or training).
+
 ---
 
 ## 📂 Architecture Overview
@@ -55,6 +59,7 @@ The system is split into three distinct layers:
 | **Execution** | `BottleneckDetector` | Optimization | Detects bottlenecks, suggests reallocations. |
 | **Execution** | `SecurityManager` | Safety | Sanitizes inputs, enforces rate limits. |
 | **Execution** | `HITLManager` | Oversight | Manages human approval for critical tasks. |
+| **Execution** | `ModelSelector` | Optimization | Selects models for cost-performance balance. |
 
 ---
 
