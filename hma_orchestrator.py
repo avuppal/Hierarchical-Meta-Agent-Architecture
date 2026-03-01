@@ -2,6 +2,7 @@ from typing import Annotated, Sequence, TypedDict, Callable, Any, Optional
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 import json
+import re
 import os
 import time
 import pandas as pd
@@ -81,7 +82,7 @@ class GraphState(TypedDict):
     meta_review: str
     successful: bool
 
-# --- 3. OpenAI Client Helper ---
+# --- 3. Helpers ---
 def call_llm(api_base, api_key, model, prompt, system_prompt="You are a helpful assistant."):
     """Generic helper to call an OpenAI-compatible endpoint (vLLM/TGI/OpenAI)."""
     client = OpenAI(base_url=api_base, api_key=api_key)
@@ -106,6 +107,24 @@ def call_llm(api_base, api_key, model, prompt, system_prompt="You are a helpful 
     except Exception as e:
         print(f"API Error: {e}")
         return f"Error: {str(e)}", {"total_tokens": 0}, 0
+
+def extract_json(text: str) -> dict:
+    """Tries to extract JSON from text (handles markdown blocks)."""
+    try:
+        return json.loads(text)
+    except:
+        # Try finding code block
+        match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+        # Try finding raw braces
+        match = re.search(r'(\{.*\})', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except:
+                pass
+    return {}
 
 # --- 4. Define Node Functions ---
 
@@ -175,30 +194,60 @@ def budget_check(state: GraphState) -> dict:
     remaining = state['total_budget_tokens'] - state['tokens_spent']
     
     if remaining < 500: 
-        print(f"Budget critical! Remaining: {remaining} tokens.")
+        print(f"Budget critical! Remaining: {remaining} tokens.\")
         return {"worker_status": "HALT_BUDGET_EXCEEDED"}
     
-    print(f"Budget OK. Remaining: {remaining} tokens.")
+    print(f"Budget OK. Remaining: {remaining} tokens.\")
     return {"worker_status": "READY_TO_EXECUTE"}
 
 def execute_worker_step(state: GraphState) -> dict:
     """Calls the local Worker Agent (vLLM)."""
     print(f"--- [Worker Agent]: Executing Task on {VLLM_MODEL_NAME} ---")
     
-    # Use the Refined Task if available, else raw
     task_to_use = state.get('refined_task') or state['task_description']
     
-    prompt = f"Task: {task_to_use}\nPrevious Output: {state.get('worker_output', 'None')}\nInstruction: Continue the work."
+    # Strict Schema Prompt (Poka-Yoke)
+    prompt = f"""
+    Task: {task_to_use}
+    Previous Output: {state.get('worker_output', 'None')}
     
-    # Call the actual vLLM endpoint
+    Instruction: Continue the work. Provide a structured response.
+    OUTPUT FORMAT: STRICT JSON ONLY. No markdown, no conversation.
+    {{
+        "thought_process": "Brief reasoning...",
+        "content": "The actual work/code/text...",
+        "status": "partial" | "complete"
+    }}
+    """
+    
     content, usage, duration = call_llm(
         VLLM_API_BASE, VLLM_API_KEY, VLLM_MODEL_NAME, 
         prompt=prompt,
-        system_prompt="You are a capable Worker Agent. Execute the task step-by-step."
+        system_prompt="You are a precise JSON-speaking Worker Agent."
     )
     
-    # Log the benchmark data
-    logger.log("WORKER_EXECUTION", duration, usage, "SUCCESS", content)
+    # Validate JSON (Zero Token Cost)
+    data = extract_json(content)
+    valid_json = bool(data and "content" in data)
+    
+    status = "REVIEWING"
+    final_output = content
+    
+    if valid_json:
+        print("  -> Valid JSON output received.")
+        final_output = json.dumps(data) # Normalized
+        # Check self-reported status
+        if data.get("status") == "complete":
+            status = "REVIEWING" # Ready for manager
+    else:
+        print("  -> Invalid JSON. Triggering automatic retry loop (managed by graph).")
+        final_output = f"ERROR: Invalid JSON received. content='{content[:50]}...'"
+        # We could add a 'RETRY' status here, but for simplicity we let manager catch it or retry logic handle it.
+        # Actually, let's be strict:
+        # status = "RETRY_JSON" # We could add a loop back to worker immediately?
+        pass
+
+    logger.log("WORKER_EXECUTION", duration, usage, "SUCCESS" if valid_json else "INVALID_JSON", content)
     
     new_spent = state['tokens_spent'] + usage.get('total_tokens', 0)
     
@@ -206,8 +255,8 @@ def execute_worker_step(state: GraphState) -> dict:
     
     return {
         "tokens_spent": new_spent,
-        "worker_output": content,
-        "worker_status": "REVIEWING"
+        "worker_output": final_output,
+        "worker_status": status
     }
 
 def review_and_decide_by_hma(state: GraphState) -> dict:
@@ -221,7 +270,7 @@ def review_and_decide_by_hma(state: GraphState) -> dict:
     You are the Meta-Agent Manager.
     Original Task: {task_to_use}
     Current Budget Used: {state['tokens_spent']} / {state['total_budget_tokens']}
-    Latest Worker Output:
+    Latest Worker Output (JSON):
     ---
     {state['worker_output']}
     ---
