@@ -6,7 +6,7 @@ class SkillRegistry:
     The 'App Store' for skills.
     Manages discovering, indexing, and fetching skills for agents.
     """
-    def __init__(self, index_path="HMA/skills/index.json"):
+    def __init__(self, index_path="skills/index.json"):
         self.index_path = index_path
         self.skills_cache = {}
         

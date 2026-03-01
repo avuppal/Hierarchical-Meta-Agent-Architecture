@@ -1,7 +1,17 @@
 import json
 import time
-from HMA.core.SessionManager import SessionManager
-from HMA.skills.SkillRegistry import SkillRegistry
+import sys
+import os
+
+# Ensure modules can be imported when running as script or package
+try:
+    from core.SessionManager import SessionManager
+    from skills.SkillRegistry import SkillRegistry
+except ImportError:
+    # If running from within the orchestrator folder or root without package context
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from core.SessionManager import SessionManager
+    from skills.SkillRegistry import SkillRegistry
 
 class AgentArchitect:
     """

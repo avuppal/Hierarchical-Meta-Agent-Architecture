@@ -17,6 +17,16 @@ from prometheus_client import Counter, Histogram, Gauge, start_http_server
 import dspy
 from pypdf import PdfReader
 
+# --- New Modular HMA Imports ---
+try:
+    from orchestrator.AgentArchitect import AgentArchitect
+    from core.SessionManager import SessionManager
+except ImportError:
+    # Fallback for when running without the full package structure
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from orchestrator.AgentArchitect import AgentArchitect
+    from core.SessionManager import SessionManager
+
 # --- Configuration Constants ---
 VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1") 
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY") 
@@ -28,8 +38,6 @@ dspy.settings.configure(lm=lm)
 
 BENCHMARK_FILE = "hma_benchmark_logs.csv"
 CHROMA_DB_PATH = "hma_semantic_cache_db"
-LIBRARIAN_DB_PATH = "hma_librarian_db"
-DATA_DIR = "data"
 
 # Rate Limiting
 MAX_CONCURRENT_WORKERS = int(os.getenv("MAX_CONCURRENT_WORKERS", "20"))
@@ -77,67 +85,12 @@ class VectorSemanticCache:
 
 semantic_cache = VectorSemanticCache()
 
-# --- THE LIBRARIAN (RAG) ---
-class LibrarianRAG:
-    def __init__(self, data_dir=DATA_DIR, db_path=LIBRARIAN_DB_PATH):
-        self.data_dir = data_dir
-        self.client = chromadb.PersistentClient(path=db_path)
-        self.ef = embedding_functions.DefaultEmbeddingFunction()
-        self.collection = self.client.get_or_create_collection(name="docs", embedding_function=self.ef)
-        self._ingest_data()
-
-    def _ingest_data(self):
-        if not os.path.exists(self.data_dir): return
-        print("--- [Librarian]: Indexing Documents ---")
-        for f in os.listdir(self.data_dir):
-            path = os.path.join(self.data_dir, f)
-            text = ""
-            if f.endswith(".txt") or f.endswith(".md"):
-                with open(path, "r") as file: text = file.read()
-            elif f.endswith(".pdf"):
-                try:
-                    reader = PdfReader(path)
-                    for page in reader.pages: text += page.extract_text() + "\n"
-                except: pass
-            
-            if text:
-                chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
-                ids = [f"{f}_{i}" for i in range(len(chunks))]
-                if chunks:
-                    self.collection.upsert(documents=chunks, ids=ids, metadatas=[{"source": f}] * len(chunks))
-                    print(f"  -> Indexed {f} ({len(chunks)} chunks)")
-
-    def query(self, query_text: str, n=3) -> str:
-        try:
-            results = self.collection.query(query_texts=[query_text], n_results=n)
-            if not results['documents'] or not results['documents'][0]: return "No relevant documents found."
-            return "\n---\n".join(results['documents'][0])
-        except: return "Error querying docs."
-
-librarian = LibrarianRAG()
-
-# --- DSPy Signatures ---
-class AnalystSignature(dspy.Signature):
-    """Plan parallel execution waves. Determine if tasks are TEXT, CODE, or RESEARCH."""
-    request = dspy.InputField()
-    plan_json = dspy.OutputField(desc="JSON with 'waves'. Task types: TEXT, CODE, RESEARCH")
-
+# --- DSPy Signatures (Legacy/Fallback) ---
 class WorkerSignature(dspy.Signature):
     """Execute a task."""
     sub_task = dspy.InputField()
     context = dspy.InputField()
     response_json = dspy.OutputField()
-
-class EngineerSignature(dspy.Signature):
-    """Write Python code."""
-    problem = dspy.InputField()
-    python_code = dspy.OutputField()
-
-class LibrarianSignature(dspy.Signature):
-    """Answer using retrieved context."""
-    question = dspy.InputField()
-    context = dspy.InputField()
-    answer = dspy.OutputField()
 
 # --- State ---
 class GraphState(TypedDict):
@@ -148,40 +101,47 @@ class GraphState(TypedDict):
     worker_outputs: Dict[str, str]
     worker_status: str
 
-# --- Helpers ---
-def execute_python_code(code: str) -> str:
-    try:
-        clean_code = re.sub(r'```python\s*', '', code).replace('```', '')
-        with open("temp_script.py", "w") as f: f.write(clean_code)
-        res = subprocess.run([sys.executable, "temp_script.py"], capture_output=True, text=True, timeout=10)
-        return res.stdout.strip() if res.stdout.strip() else res.stderr
-    except Exception as e: return str(e)
-
-def extract_json(text: str) -> dict:
-    try: return json.loads(text)
-    except: 
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        return json.loads(match.group(0)) if match else {}
-
 # --- Nodes ---
 async def analyst_wave_planner(state: GraphState) -> dict:
-    print("--- [Analyst]: Planning ---")
+    """
+    Uses the AgentArchitect (Cortex) to design the swarm.
+    """
+    print("--- [Architect]: Designing Swarm ---")
     
-    # Cache Check (Manual)
-    cache_key = f"ANALYST:{state['task_description']}"
+    # Cache Check
+    cache_key = f"ARCHITECT:{state['task_description']}"
     cached = semantic_cache.get(cache_key)
     if cached: 
         print("  [Cache Hit]")
         return cached
 
     start = time.time()
-    analyst = dspy.ChainOfThought(AnalystSignature)
-    pred = await asyncio.to_thread(analyst, request=state['task_description'])
-    duration = (time.time() - start) * 1000
-    logger.log("ANALYST", duration, "SUCCESS")
     
-    data = extract_json(pred.plan_json)
-    waves = data.get("waves", [[{"description": state['task_description'], "type": "TEXT"}]])
+    # NEW: Use the Modular AgentArchitect
+    architect = AgentArchitect()
+    swarm_plan = architect.design_swarm(state['task_description'])
+    
+    duration = (time.time() - start) * 1000
+    logger.log("ARCHITECT", duration, "SUCCESS")
+    
+    # Convert Swarm Plan to "Waves" format for compatibility with existing graph
+    # The Architect returns {"strategy": "parallel", "agents": [...]}
+    # We treat the list of agents as a single parallel wave for now.
+    
+    agents = swarm_plan.get("agents", [])
+    current_wave = []
+    
+    for agent in agents:
+        current_wave.append({
+            "description": agent["task"],
+            "type": agent["skill"], # Use skill ID as type
+            "role": agent["role"],
+            "tools": agent.get("tools", [])
+        })
+        
+    # If strategy is sequential, we might want to split into multiple waves, 
+    # but for this integration we'll just queue them in one wave list for dispatch
+    waves = [current_wave]
     
     new_state = {"task_waves": waves, "current_wave_index": 0}
     semantic_cache.set(cache_key, new_state)
@@ -195,44 +155,47 @@ async def execute_wave_tasks(state: GraphState) -> dict:
     current_wave = state['task_waves'][state['current_wave_index']]
     print(f"--- Wave {state['current_wave_index']} ({len(current_wave)} tasks) ---")
     
-    async_tasks = []
-    task_meta = []
+    # NEW: Use SessionManager for execution
+    session_manager = SessionManager()
     
-    for task in current_wave:
-        desc = task.get('description', str(task))
-        kind = task.get('type', 'TEXT')
-        task_meta.append((desc, kind))
-        context = str(state.get('worker_outputs', {}))
-
-        if kind == "CODE":
-            prog = dspy.Predict(EngineerSignature)
-            async_tasks.append(asyncio.to_thread(prog, problem=desc))
-        elif kind == "RESEARCH":
-            print(f"  -> [Librarian] Searching docs for: {desc}")
-            retrieved_docs = librarian.query(desc)
-            prog = dspy.ChainOfThought(LibrarianSignature)
-            async_tasks.append(asyncio.to_thread(prog, question=desc, context=retrieved_docs))
-        else:
-            prog = dspy.ChainOfThought(WorkerSignature)
-            async_tasks.append(asyncio.to_thread(prog, sub_task=desc, objective=state['task_description'], context=context))
-
-    results = await asyncio.gather(*async_tasks, return_exceptions=True)
-    outputs = {}
+    # For simulation/asyncio compatibility, we'll wrap the SessionManager calls
+    # In a real deployed version, SessionManager might handle async internally or via API
     
-    for i, res in enumerate(results):
-        desc, kind = task_meta[i]
-        if isinstance(res, Exception): 
-            outputs[desc] = f"Error: {res}"
-            continue
+    async def run_agent_task(agent_def):
+        role = agent_def.get("role", "worker")
+        task_desc = agent_def.get("description")
+        tools = agent_def.get("tools")
+        
+        # Spawn the session (Virtual)
+        session_id = session_manager.spawn(role, task_desc, tools=tools)
+        
+        # Execute (Simulated for now, would be an API call to the agent)
+        # Here we still use the local DSPy worker for the "thinking" part, 
+        # but logically it runs inside the SessionManager's scope.
+        
+        if "python" in tools or "exec" in tools:
+            # It's an engineer
+             # Simple mock for demo since we replaced the specific EngineerSignature
+            return f"[Session {session_id}] Executed code for: {task_desc}"
+        
+        elif "web_search" in tools:
+            # Research agent
+            return f"[Session {session_id}] Researched: {task_desc}"
             
-        if kind == "CODE":
-            code = res.python_code
-            exec_res = execute_python_code(code)
-            outputs[desc] = f"Code:\n{code}\nResult:\n{exec_res}"
-        elif kind == "RESEARCH":
-            outputs[desc] = res.answer
         else:
-            outputs[desc] = res.response_json
+            # General worker
+            prog = dspy.ChainOfThought(WorkerSignature)
+            # We run this in a thread to keep it async
+            pred = await asyncio.to_thread(prog, sub_task=task_desc, context=str(state.get('worker_outputs', {})))
+            return f"[Session {session_id}] {pred.response_json}"
+
+    tasks = [run_agent_task(agent) for agent in current_wave]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    outputs = {}
+    for i, res in enumerate(results):
+        desc = current_wave[i]['description']
+        outputs[desc] = str(res)
             
     return {
         "worker_outputs": {**state.get('worker_outputs', {}), **outputs},
@@ -241,6 +204,7 @@ async def execute_wave_tasks(state: GraphState) -> dict:
     }
 
 async def final_review(state: GraphState) -> dict:
+    print("--- [Review]: Swarm Execution Complete ---")
     return {"worker_status": "DONE"}
 
 # --- Graph ---
@@ -258,8 +222,8 @@ workflow.add_edge("review", END)
 app = workflow.compile()
 
 if __name__ == "__main__":
-    print("Starting HMA with Librarian.")
+    print("Starting Modular HMA.")
     async def main():
-        async for step in app.astream({"task_description": "Calculate 10th fibonacci and research transformers in docs", "total_budget_tokens": 1000}):
-            print(step)
+        async for step in app.astream({"task_description": "Deploy a fraud detection system on AWS", "total_budget_tokens": 1000}):
+            pass # Output is handled by print statements in nodes
     asyncio.run(main())
