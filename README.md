@@ -35,6 +35,10 @@ This repository implements the **Hierarchical Meta-Agent Architecture (HMA)**, a
 *   **What it does:** Identifies slow agents (`BottleneckDetector`) and handles failures/retry.
 *   **Benefit:** Optimizes throughput by reallocating resources and ensuring reliability.
 
+### 7. Security & Human-in-the-Loop (HITL)
+*   **What it does:** `SecurityManager` prevents prompt injection/DDoS; `HITLManager` pauses for approval on critical tasks.
+*   **Benefit:** Maintains safety and quality without sacrificing efficiency—lightweight checks add minimal overhead.
+
 ---
 
 ## 📂 Architecture Overview
@@ -49,6 +53,8 @@ The system is split into three distinct layers:
 | **Execution** | `SessionManager` | Runtime | Spawns processes, enforces sandboxes, manages lifecycle. |
 | **Execution** | `QueueManager` | Flow Control | Manages job queues with priorities. |
 | **Execution** | `BottleneckDetector` | Optimization | Detects bottlenecks, suggests reallocations. |
+| **Execution** | `SecurityManager` | Safety | Sanitizes inputs, enforces rate limits. |
+| **Execution** | `HITLManager` | Oversight | Manages human approval for critical tasks. |
 
 ---
 
