@@ -7,7 +7,8 @@ import os
 import time
 import hashlib
 import pandas as pd
-from openai import OpenAI
+import asyncio
+from openai import AsyncOpenAI
 
 # --- Configuration Constants ---
 VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1") 
@@ -102,18 +103,18 @@ class GraphState(TypedDict):
     meta_review: str
     successful: bool
 
-# --- 4. Helpers ---
-def call_llm(api_base, api_key, model, prompt, system_prompt="You are a helpful assistant."):
+# --- 4. Async Helpers ---
+async def call_llm_async(api_base, api_key, model, prompt, system_prompt="You are a helpful assistant."):
     cache_key = hashlib.sha256(f"{model}:{system_prompt}:{prompt}".encode()).hexdigest()
     cached = semantic_cache.get(cache_key)
     if cached:
         print(f"  [Cache Hit] Serving response from {CACHE_FILE}")
         return cached['content'], cached['usage'], 0.0 
     
-    client = OpenAI(base_url=api_base, api_key=api_key)
+    client = AsyncOpenAI(base_url=api_base, api_key=api_key)
     start_time = time.time()
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -134,9 +135,8 @@ def call_llm(api_base, api_key, model, prompt, system_prompt="You are a helpful 
 def extract_json(text: str) -> dict:
     try: return json.loads(text)
     except:
-        match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
-        if match: return json.loads(match.group(1))
-        match = re.search(r'(\{.*\})', text, re.DOTALL)
+        match = re.search(r'```json\s*(\\{.*?\\})\\s*```', text, re.DOTALL)
+        if match: return json.loads(match.group(1))\n        match = re.search(r'(\\{.*\\})', text, re.DOTALL)
         if match: 
             try: return json.loads(match.group(1))
             except: pass
@@ -144,7 +144,7 @@ def extract_json(text: str) -> dict:
 
 # --- 5. Node Functions ---
 
-def analyst_wave_planner(state: GraphState) -> dict:
+async def analyst_wave_planner(state: GraphState) -> dict:
     """Plans the execution waves based on dependencies."""
     print("--- [Analyst Node]: Planning Task Waves ---")
     raw_task = state['task_description']
@@ -168,7 +168,7 @@ def analyst_wave_planner(state: GraphState) -> dict:
     }}
     """
     
-    content, usage, duration = call_llm(
+    content, usage, duration = await call_llm_async(
         HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME, 
         prompt=prompt,
         system_prompt="You are a precise technical analyst."
@@ -176,12 +176,11 @@ def analyst_wave_planner(state: GraphState) -> dict:
     logger.log("ANALYST_PLANNING", duration, usage, "SUCCESS", content)
     
     data = extract_json(content)
-    waves = data.get("waves", [[raw_task]]) # Fallback to single task
+    waves = data.get("waves", [[raw_task]]) 
     complexity = data.get("complexity", "MEDIUM")
     
     print(f"Analyst Plan: {len(waves)} Waves. Complexity: {complexity}")
     
-    # Sizing Logic
     base_budget = state['total_budget_tokens']
     multipliers = {"LOW": 0.8, "MEDIUM": 1.0, "HIGH": 1.5}
     adjusted_budget = int(base_budget * multipliers.get(complexity, 1.0))
@@ -194,30 +193,29 @@ def analyst_wave_planner(state: GraphState) -> dict:
         "tokens_spent": state['tokens_spent'] + usage.get('total_tokens', 0)
     }
 
-def dispatch_wave(state: GraphState) -> dict:
+async def dispatch_wave(state: GraphState) -> dict:
     """Router: Checks if there are waves left to run."""
     if state['current_wave_index'] >= len(state['task_waves']):
-        return {"worker_status": "COMPLETE"} # All waves done, go to Final Review
+        return {"worker_status": "COMPLETE"} 
     
     current_wave = state['task_waves'][state['current_wave_index']]
     print(f"--- [Orchestrator]: Dispatching Wave {state['current_wave_index'] + 1}/{len(state['task_waves'])}: {len(current_wave)} parallel tasks ---")
     return {"worker_status": "EXECUTING_WAVE"}
 
-def execute_wave_tasks(state: GraphState) -> dict:
-    """Executes all tasks in the current wave (Simulated Parallelism)."""
+async def execute_wave_tasks(state: GraphState) -> dict:
+    """Executes all tasks in the current wave in PARALLEL via asyncio.gather."""
     current_wave = state['task_waves'][state['current_wave_index']]
-    outputs = {}
-    total_cost = 0
     
-    # In a real async runtime, these would run in parallel threads.
+    # Prepare Tasks for asyncio.gather
+    async_tasks = []
+    task_names = []
+
     for task in current_wave:
-        print(f"  -> Starting Sub-Task: {task[:40]}...")
+        print(f"  -> Queueing Sub-Task: {task[:40]}...")
+        task_names.append(task)
         
-        # Hybrid Routing: Inject CoT if High Complexity
         use_cot = state['complexity_score'] == "HIGH"
         instruction = "Think step-by-step." if use_cot else "Be concise."
-        
-        # Context Injection: Include previous wave outputs for context
         context_str = "\n".join([f"- {k}: {v[:100]}..." for k, v in state.get('worker_outputs', {}).items()])
         
         prompt = f"""
@@ -233,17 +231,25 @@ def execute_wave_tasks(state: GraphState) -> dict:
         }}
         """
         
-        content, usage, duration = call_llm(
+        async_tasks.append(call_llm_async(
             VLLM_API_BASE, VLLM_API_KEY, VLLM_MODEL_NAME, 
             prompt=prompt,
             system_prompt="You are a precise Worker Agent."
-        )
-        
+        ))
+    
+    # FIRE ALL AT ONCE (True Parallelism)
+    print(f"  -> Firing {len(async_tasks)} concurrent requests to vLLM...")
+    results = await asyncio.gather(*async_tasks)
+    
+    outputs = {}
+    total_cost = 0
+    
+    for i, (content, usage, duration) in enumerate(results):
+        task_name = task_names[i]
         data = extract_json(content)
         final_output = data.get("content", content)
-        outputs[task] = final_output
+        outputs[task_name] = final_output
         total_cost += usage.get('total_tokens', 0)
-        
         logger.log("WORKER_EXECUTION", duration, usage, "SUCCESS", content)
 
     print(f"Wave {state['current_wave_index'] + 1} Complete. Cost: {total_cost} tokens.")
@@ -252,10 +258,10 @@ def execute_wave_tasks(state: GraphState) -> dict:
         "worker_outputs": {**state.get('worker_outputs', {}), **outputs},
         "tokens_spent": state['tokens_spent'] + total_cost,
         "current_wave_index": state['current_wave_index'] + 1,
-        "worker_status": "READY_TO_DISPATCH" # Loop back to check next wave
+        "worker_status": "READY_TO_DISPATCH"
     }
 
-def final_review(state: GraphState) -> dict:
+async def final_review(state: GraphState) -> dict:
     """Synthesizes all outputs."""
     print("--- [HMA Controller]: Final Review & Synthesis ---")
     
@@ -269,7 +275,7 @@ def final_review(state: GraphState) -> dict:
     Synthesize this into a final report.
     """
     
-    content, usage, duration = call_llm(
+    content, usage, duration = await call_llm_async(
         HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME,
         prompt=prompt,
         system_prompt="You are a strict Project Manager."
@@ -302,7 +308,7 @@ workflow.add_conditional_edges(
     }
 )
 
-workflow.add_edge("execute_wave_tasks", "dispatch_wave") # Loop back
+workflow.add_edge("execute_wave_tasks", "dispatch_wave") 
 workflow.add_edge("final_review", END)
 
 app = workflow.compile()
@@ -314,9 +320,12 @@ if __name__ == "__main__":
         "total_budget_tokens": 5000, 
     }
     
-    config = {"configurable": {"recursion_limit": 20}}
-    try:
-        for step in app.stream(initial_state, config=config):
-            for key in step: print(f"  -> Finished Node: {key}")
-    except Exception as e:
-        print(f"Graph Execution Failed: {e}")
+    async def main():
+        config = {"configurable": {"recursion_limit": 20}}
+        try:
+            async for step in app.astream(initial_state, config=config):
+                for key in step: print(f"  -> Finished Node: {key}")
+        except Exception as e:
+            print(f"Graph Execution Failed: {e}")
+            
+    asyncio.run(main())
