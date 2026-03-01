@@ -30,6 +30,18 @@ This system implements key industrial management theories to optimize AI Token E
     *   **Function:** Enforces **Strict JSON Structured Output** from worker agents.
     *   **Benefit:** Zero-token validation (syntax check) prevents the Manager from wasting tokens reading invalid responses.
 
+## Enterprise Operations (Ops)
+
+This repository includes production-grade resilience features:
+
+1.  **Fault Tolerance:** Exponential backoff retries (via `tenacity`) for API failures.
+2.  **Rate Limiting:** `asyncio.Semaphore` prevents overloading the vLLM server.
+    *   Configure via `MAX_CONCURRENT_WORKERS` (Default: 20).
+3.  **Observability:** Prometheus metrics exported for Grafana dashboards.
+    *   `hma_tokens_total`: Total token consumption.
+    *   `hma_worker_errors_total`: Error rates.
+    *   `hma_task_duration_seconds`: Latency distribution.
+
 ## Structure
 
 *   **`hma_orchestrator.py`**: The Async LangGraph engine implementing the HMA logic (Analyst -> Parallel Waves -> Reduce -> Loop).
