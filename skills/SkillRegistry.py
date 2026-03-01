@@ -75,6 +75,30 @@ class SkillRegistry:
                 "description": "Deploy infrastructure using Terraform or AWS CLI.",
                 "tools": ["exec", "read", "write"],
                 "repo": "https://github.com/company/skills/aws-deploy"
+            },
+            "queue-optimization": {
+                "name": "queue-optimization",
+                "description": "Manage job queues with priorities and load balancing.",
+                "tools": ["python", "exec"],
+                "repo": "local/skills/queue"
+            },
+            "forecasting": {
+                "name": "forecasting",
+                "description": "Predict token costs and execution times using historical data.",
+                "tools": ["python", "read"],
+                "repo": "local/skills/forecast"
+            },
+            "bottleneck-analysis": {
+                "name": "bottleneck-analysis",
+                "description": "Detect execution bottlenecks and suggest reallocations.",
+                "tools": ["python", "read"],
+                "repo": "local/skills/bottleneck"
+            },
+            "scalability-manager": {
+                "name": "scalability-manager",
+                "description": "Handle dynamic resource scaling and failure resilience.",
+                "tools": ["exec", "read"],
+                "repo": "local/skills/scalability"
             }
         }
 
@@ -159,5 +183,13 @@ class SkillRegistry:
                 return "You are an AWS infrastructure expert. Use Terraform to provision resources."
             elif "fraud" in skill_id:
                 return "You are a data scientist specializing in anomaly detection."
+            elif "queue" in skill_id:
+                return "You are a queue optimization expert. Manage priorities and load balance tasks."
+            elif "forecast" in skill_id:
+                return "You are a forecasting analyst. Predict costs and times based on historical data."
+            elif "bottleneck" in skill_id:
+                return "You are a bottleneck analyst. Identify constraints and suggest improvements."
+            elif "scalability" in skill_id:
+                return "You are a scalability manager. Scale resources and handle failures."
             
         return "You are a helpful assistant."
