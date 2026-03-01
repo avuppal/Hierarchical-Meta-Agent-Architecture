@@ -1,6 +1,13 @@
 import os
+import sys
 from typing import Dict, Any, List
-from core.ForecastingEngine import forecasting_engine
+
+# Ensure relative imports work
+try:
+    from ForecastingEngine import forecasting_engine
+except ImportError:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from orchestrator.ForecastingEngine import forecasting_engine
 
 class ModelSelector:
     """
