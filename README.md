@@ -27,6 +27,14 @@ This repository implements the **Hierarchical Meta-Agent Architecture (HMA)**, a
 *   **What it does:** Fires all sub-agents simultaneously using `asyncio.gather`.
 *   **Benefit:** Saturates GPU batching (via vLLM) for **5x faster throughput** than sequential chains.
 
+### 5. Queuing & Forecasting (Flow Control)
+*   **What it does:** Manages job queues with priorities (`QueueManager`) and predicts costs/times (`ForecastingEngine`).
+*   **Benefit:** Prevents overload and enables proactive budgeting (Queuing Theory + Forecasting).
+
+### 6. Bottleneck Detection & Resilience (TOC-Inspired)
+*   **What it does:** Identifies slow agents (`BottleneckDetector`) and handles failures/retry.
+*   **Benefit:** Optimizes throughput by reallocating resources and ensuring reliability.
+
 ---
 
 ## 📂 Architecture Overview
@@ -36,8 +44,11 @@ The system is split into three distinct layers:
 | Layer | Component | Role | Responsibility |
 | :--- | :--- | :--- | :--- |
 | **Cognition** | `AgentArchitect` | Strategy | Analyzes user intent, designs swarm manifests. |
+| **Cognition** | `ForecastingEngine` | Prediction | Forecasts costs/times using historical data. |
 | **Memory** | `SkillRegistry` | Knowledge | Indexes capabilities, RAG search for tools. |
 | **Execution** | `SessionManager` | Runtime | Spawns processes, enforces sandboxes, manages lifecycle. |
+| **Execution** | `QueueManager` | Flow Control | Manages job queues with priorities. |
+| **Execution** | `BottleneckDetector` | Optimization | Detects bottlenecks, suggests reallocations. |
 
 ---
 
