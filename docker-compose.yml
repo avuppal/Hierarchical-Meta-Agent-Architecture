@@ -7,22 +7,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Connect to the internal vLLM service
       - VLLM_API_BASE=http://vllm-worker:8000/v1
       - VLLM_API_KEY=EMPTY
       - VLLM_MODEL_NAME=facebook/opt-125m
-      # For HMA logic, use the same model or a different one if desired
       - HMA_API_BASE=http://vllm-worker:8000/v1
       - HMA_API_KEY=EMPTY
       - HMA_MODEL_NAME=facebook/opt-125m
-      # Concurrency Limit for Rate Limiting
       - MAX_CONCURRENT_WORKERS=32
     depends_on:
       - vllm-worker
     volumes:
-      # Persist benchmark logs to host
       - ./hma_benchmark_logs.csv:/app/hma_benchmark_logs.csv
       - ./hma_semantic_cache_db:/app/hma_semantic_cache_db
+      - ./data:/app/data # Mount local data folder for Librarian RAG
 
   vllm-worker:
     image: vllm/vllm-openai:latest
@@ -32,21 +29,20 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1 # UPDATE THIS: Use 'all' or specific number (e.g., 8) for your rig
+              count: 1 
               capabilities: [gpu]
     ports:
       - "8000:8000"
-    # OPTIMIZATION FLAGS:
-    # 1. --enable-prefix-caching: Reuses KV cache for system prompts (Huge latency win)
-    # 2. --gpu-memory-utilization: Maximize VRAM usage
-    # 3. Speculative Decoding (Optional): Add --speculative-model [small-model] if using a large main model
+    # PERFORMANCE TUNING:
+    # 1. Quantization: Use '--quantization awq' with AWQ models (e.g. TheBloke/Llama-2-70B-AWQ) to save VRAM.
+    # 2. Speculative Decoding: Add '--speculative-model [small-model]' for 2x speedup.
     command: >
       --model facebook/opt-125m
       --gpu-memory-utilization 0.90
       --max-model-len 2048
       --enable-prefix-caching
       --disable-log-stats
+      --enforce-eager
     volumes:
-      # Cache models so they don't download every restart
       - ~/.cache/huggingface:/root/.cache/huggingface
-    ipc: host # Recommended for vLLM performance
+    ipc: host 

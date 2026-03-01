@@ -10,4 +10,5 @@ tenacity
 chromadb
 sentence-transformers
 dspy-ai
+pypdf
 pyright>=1.1.338
