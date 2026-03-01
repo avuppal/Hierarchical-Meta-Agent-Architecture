@@ -10,6 +10,7 @@ services:
       - VLLM_API_BASE=http://vllm-worker:8000/v1
       - VLLM_API_KEY=EMPTY
       - VLLM_MODEL_NAME=facebook/opt-125m
+      - AVAILABLE_MODELS=facebook/opt-125m,meta-llama/Llama-3-8B,meta-llama/Llama-3-70B
       - HMA_API_BASE=http://vllm-worker:8000/v1
       - HMA_API_KEY=EMPTY
       - HMA_MODEL_NAME=facebook/opt-125m

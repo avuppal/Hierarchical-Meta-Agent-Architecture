@@ -25,6 +25,7 @@ try:
     from core.QueueManager import queue_manager
     from core.BottleneckDetector import bottleneck_detector
     from core.HITLManager import hitl_manager
+    from core.ModelSelector import model_selector
 except ImportError:
     # Fallback for when running without the full package structure
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +35,7 @@ except ImportError:
     from core.QueueManager import queue_manager
     from core.BottleneckDetector import bottleneck_detector
     from core.HITLManager import hitl_manager
+    from core.ModelSelector import model_selector
 
 # --- THE LIBRARIAN (RAG) ---
 DATA_DIR = "data"
@@ -79,11 +81,19 @@ librarian = LibrarianRAG()
 # --- Configuration Constants ---
 VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY")
-VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m")
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m")  # Fallback
 
-# Configure DSPy
-lm = dspy.LM(model=f"openai/{VLLM_MODEL_NAME}", api_base=VLLM_API_BASE, api_key=VLLM_API_KEY)
-dspy.settings.configure(lm=lm)
+# Global LM (updated dynamically)
+lm = None
+
+def configure_lm(model_name: str):
+    """Dynamically configure DSPy with selected model."""
+    global lm
+    lm = dspy.LM(model=f"openai/{model_name}", api_base=VLLM_API_BASE, api_key=VLLM_API_KEY)
+    dspy.settings.configure(lm=lm)
+
+# Initial config
+configure_lm(VLLM_MODEL_NAME)
 
 BENCHMARK_FILE = "hma_benchmark_logs.csv"
 CHROMA_DB_PATH = "hma_semantic_cache_db"
@@ -163,8 +173,13 @@ async def analyst_wave_planner(state: GraphState) -> dict:
     """
     print("--- [Architect]: Designing Swarm ---")
 
-    # Cache Check
-    cache_key = f"ARCHITECT:{state['task_description']}"
+    # NEW: Select optimal model for privacy and efficiency
+    selected_model = model_selector.select_model(state['task_description'], state['total_budget_tokens'])
+    configure_lm(selected_model)
+    print(f"[Architect] Selected model: {selected_model} (private, open-source)")
+
+    # Cache Check (now model-aware)
+    cache_key = f"ARCHITECT:{selected_model}:{state['task_description']}"
     cached = semantic_cache.get(cache_key)
     if cached:
         print("  [Cache Hit]")
@@ -215,7 +230,7 @@ async def analyst_wave_planner(state: GraphState) -> dict:
     # but for this integration we'll just queue them in one wave list for dispatch
     waves = [current_wave]
 
-    new_state = {"task_waves": waves, "current_wave_index": 0}
+    new_state = {"task_waves": waves, "current_wave_index": 0, "selected_model": selected_model}
     semantic_cache.set(cache_key, new_state)
     return new_state
 
