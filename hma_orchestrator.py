@@ -58,6 +58,10 @@ class AgentBudgetState(BaseModel):
     task_description: str = Field(description="The overall goal for the agents.")
     total_budget_tokens: int = Field(description="The hard limit for token expenditure.")
     
+    # Enhanced State (Analyst Node)
+    refined_task: str = Field(default="", description="Optimized technical brief")
+    complexity_score: str = Field(default="MEDIUM", description="LOW/MEDIUM/HIGH")
+
     # Runtime State
     tokens_spent: int = Field(default=0, description="Accumulated tokens spent so far.")
     worker_status: str = Field(default="IDLE", description="IDLE, RUNNING, REVIEWING, RESTART, COMPLETE")
@@ -69,6 +73,8 @@ class AgentBudgetState(BaseModel):
 class GraphState(TypedDict):
     task_description: str
     total_budget_tokens: int
+    refined_task: str
+    complexity_score: str
     tokens_spent: int
     worker_status: str
     worker_output: str
@@ -103,6 +109,65 @@ def call_llm(api_base, api_key, model, prompt, system_prompt="You are a helpful 
 
 # --- 4. Define Node Functions ---
 
+def analyst_sizing_heuristic(state: GraphState) -> dict:
+    """Refines the task and estimates complexity (Sizing)."""
+    print("--- [Analyst Node]: Refining Task & Sizing Project ---")
+    
+    raw_task = state['task_description']
+    
+    # Prompt for rewriting and sizing
+    prompt = f"""
+    You are an Expert AI Project Manager.
+    Your goal is to prepare a task for an autonomous agent.
+    
+    Raw Request: "{raw_task}"
+    
+    1. Rewrite this task into a strict, technical, MECE-structured brief. Remove fluff.
+    2. Rate the complexity as LOW, MEDIUM, or HIGH.
+    
+    Output Format:
+    COMPLEXITY: [LOW/MEDIUM/HIGH]
+    BRIEF: [The refined text]
+    """
+    
+    content, usage, duration = call_llm(
+        HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME, 
+        prompt=prompt,
+        system_prompt="You are a precise technical analyst."
+    )
+    
+    logger.log("ANALYST_SIZING", duration, usage, "SUCCESS", content)
+    
+    # Parse the output (simple parsing)
+    complexity = "MEDIUM"
+    refined_brief = raw_task # Fallback
+    
+    if "COMPLEXITY:" in content and "BRIEF:" in content:
+        try:
+            parts = content.split("BRIEF:")
+            complexity_part = parts[0].split("COMPLEXITY:")[1].strip().split()[0].upper() # Grab first word
+            refined_brief = parts[1].strip()
+            if complexity_part in ["LOW", "MEDIUM", "HIGH"]:
+                complexity = complexity_part
+        except:
+            pass
+            
+    # Apply Sizing Heuristic to Budget
+    # If user gave a budget, we treat it as a 'baseline' and adjust.
+    base_budget = state['total_budget_tokens']
+    multipliers = {"LOW": 0.8, "MEDIUM": 1.0, "HIGH": 1.5} # Low complexity saves budget!
+    
+    adjusted_budget = int(base_budget * multipliers.get(complexity, 1.0))
+    
+    print(f"Analyst Result: {complexity} Complexity. Budget adjusted: {base_budget} -> {adjusted_budget}")
+    
+    return {
+        "refined_task": refined_brief,
+        "complexity_score": complexity,
+        "total_budget_tokens": adjusted_budget,
+        "tokens_spent": state['tokens_spent'] + usage.get('total_tokens', 0)
+    }
+
 def budget_check(state: GraphState) -> dict:
     """Checks if the remaining budget is sufficient to proceed."""
     print("--- [HMA Controller]: Checking Budget ---")
@@ -120,7 +185,10 @@ def execute_worker_step(state: GraphState) -> dict:
     """Calls the local Worker Agent (vLLM)."""
     print(f"--- [Worker Agent]: Executing Task on {VLLM_MODEL_NAME} ---")
     
-    prompt = f"Task: {state['task_description']}\nPrevious Output: {state.get('worker_output', 'None')}\nInstruction: Continue the work."
+    # Use the Refined Task if available, else raw
+    task_to_use = state.get('refined_task') or state['task_description']
+    
+    prompt = f"Task: {task_to_use}\nPrevious Output: {state.get('worker_output', 'None')}\nInstruction: Continue the work."
     
     # Call the actual vLLM endpoint
     content, usage, duration = call_llm(
@@ -146,10 +214,12 @@ def review_and_decide_by_hma(state: GraphState) -> dict:
     """HMA Controller uses a high-reasoning model to review output and decide next step."""
     print("--- [HMA Controller]: Reviewing Output & Deciding ---")
     
+    task_to_use = state.get('refined_task') or state['task_description']
+
     # Prompt the HMA to evaluate progress
     prompt = f"""
     You are the Meta-Agent Manager.
-    Original Task: {state['task_description']}
+    Original Task: {task_to_use}
     Current Budget Used: {state['tokens_spent']} / {state['total_budget_tokens']}
     Latest Worker Output:
     ---
@@ -198,12 +268,17 @@ def review_and_decide_by_hma(state: GraphState) -> dict:
 workflow = StateGraph(GraphState)
 
 # Define the nodes
+workflow.add_node("analyst_sizing", analyst_sizing_heuristic)
 workflow.add_node("budget_check", budget_check)
 workflow.add_node("execute_worker", execute_worker_step)
 workflow.add_node("review_and_decide", review_and_decide_by_hma)
 
 # Define the edges (flow)
-workflow.set_entry_point("budget_check")
+# ENTRY POINT: Analyst Node First
+workflow.set_entry_point("analyst_sizing")
+
+# Analyst -> Budget Check (Start the loop)
+workflow.add_edge("analyst_sizing", "budget_check")
 
 workflow.add_conditional_edges(
     "budget_check",
@@ -235,7 +310,7 @@ if __name__ == "__main__":
     print(f"Connecting to vLLM at {VLLM_API_BASE} (Worker) and {HMA_API_BASE} (HMA)")
     
     initial_state = {
-        "task_description": "Summarize the key differences between Transformer and SSM architectures.",
+        "task_description": "I want to know the difference between ssm and transformer but make it quick and focus on long context.",
         "total_budget_tokens": 5000, 
         "tokens_spent": 0,
         "worker_status": "IDLE",
@@ -257,4 +332,7 @@ if __name__ == "__main__":
         
     print("\\n--- BENCHMARK END ---")
     if final_state:
-        print(f"Final Tokens Spent: {final_state.get('review_and_decide', {}).get('tokens_spent', 'Unknown')}")
+        last_node_state = list(final_state.values())[0]
+        print(f"Final Tokens Spent: {last_node_state.get('tokens_spent', 'Unknown')}")
+        print(f"Refined Task: {last_node_state.get('refined_task', 'None')}")
+        print(f"Complexity: {last_node_state.get('complexity_score', 'None')}")
