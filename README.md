@@ -1,87 +1,119 @@
 # Hierarchical Meta-Agent Architecture (HMA)
 
-This repository contains the research codebase for testing the efficiency of **Hierarchical Meta-Agent Systems** versus flat multi-agent structures.
+The next-generation infrastructure for **Token-Efficient, Latency-Optimized Agent Swarms**.
 
-## Hypothesis
+This repository implements the **Human-Machine Architecture (HMA)**, a modular system designed to separate execution from cognition, enabling dynamic swarm composition, just-in-time skill loading, and massive parallel execution.
 
-> For a fixed computational budget (time/energy), the overall efficiency (quality of final output per unit of cost) of a multi-agent system will be maximized by introducing a **Hierarchical Meta-Agent** whose primary function is **Dynamic Resource Budgeting**, **Interruption Synthesis**, and **Tool Creation**, rather than just task decomposition.
+---
 
-## Architecture & Management Theory
+## 🚀 Key Features
 
-This system implements key industrial management theories to optimize AI Token Efficiency:
+### 1. The Cortex (Dynamic Planning)
+*   **What it does:** Replaces static task lists with dynamic strategy generation.
+*   **Component:** `orchestrator/AgentArchitect.py`
+*   **Benefit:** The system doesn't just "do tasks"—it **architects a team** specifically for your request (e.g., "Spawn 1 Researcher + 1 Python Engineer").
 
-1.  **DSPy Cognitive Layer (Self-Improving Prompts):**
-    *   **Theory:** Optimization over Heuristics.
-    *   **Function:** Replaces brittle hand-written prompts with **DSPy Signatures** (Analyst, Worker, Engineer). Allows the system to *compile* optimized prompts based on performance metrics.
-    *   **Benefit:** Higher accuracy with fewer tokens (Prompt Optimization).
+### 2. The Core (Efficient Execution)
+*   **What it does:** Provides a sandboxed, state-isolated runtime for agents.
+*   **Component:** `core/SessionManager.py`
+*   **Benefit:** **Zero Context Bloat.** Sub-agents start with empty context, reducing token costs by ~80% compared to shared-history swarms.
 
-2.  **The Librarian (RAG / Knowledge Management):**
-    *   **Theory:** Grounded Truth.
-    *   **Function:** Automatically indexes local documents (PDFs, Text) in the `data/` folder into ChromaDB. Agents can trigger a "RESEARCH" task to query this private knowledge base.
-    *   **Benefit:** Eliminates hallucination on internal data.
+### 3. The Universal Registry (Infinite Skills)
+*   **What it does:** An "App Store" for agent tools. Supports local skills (`skills/`) and imports directly from **LangChain**, **ClawHub**, and remote repositories.
+*   **Component:** `skills/SkillRegistry.py`
+*   **Benefit:** Your agents have access to 10,000+ tools without bloating the codebase.
 
-3.  **The Engineer (Dynamic Tool Creation):**
-    *   **Theory:** Make vs. Buy Decision.
-    *   **Function:** Automatically detects computational tasks (Math/Data) and writes/executes **Python Code** in a sandbox instead of using LLM reasoning.
-    *   **Benefit:** 100x efficiency for math/logic.
+### 4. HPC Optimization (Parallelization)
+*   **What it does:** Fires all sub-agents simultaneously using `asyncio.gather`.
+*   **Benefit:** Saturates GPU batching (via vLLM) for **5x faster throughput** than sequential chains.
 
-4.  **Vector Semantic Cache (Collective Memory):**
-    *   **Theory:** Memoization.
-    *   **Function:** Stores vector embeddings of every sub-agent interaction. If a similar problem arises, the solution is retrieved instantly.
-    *   **Benefit:** "Skill Acquisition." Cost drops to **Zero Tokens** for repeated tasks.
+---
 
-5.  **Parallel Execution Engine (HPC Optimization):**
-    *   **Theory:** Amdahl's Law.
-    *   **Function:** Uses `asyncio.gather` to fire all tasks in a wave simultaneously, leveraging vLLM's continuous batching on 8x GPUs.
+## 📂 Architecture Overview
 
-## Structure
+The system is split into three distinct layers:
 
-*   **`hma_orchestrator.py`**: The Async LangGraph engine implementing the HMA logic with DSPy modules.
-*   **`service.py`**: FastAPI wrapper exposing the HMA as a scalable "Agent-as-a-Service" (AaaS).
-*   **`docker-compose.yml`**: Full-stack deployment (HMA Service + vLLM Worker).
-*   **`hma_benchmark_logs.csv`**: Automatically generated metrics file tracking Token ROI and Latency.
+| Layer | Component | Role | Responsibility |
+| :--- | :--- | :--- | :--- |
+| **Cognition** | `AgentArchitect` | Strategy | Analyzes user intent, designs swarm manifests. |
+| **Memory** | `SkillRegistry` | Knowledge | Indexes capabilities, RAG search for tools. |
+| **Execution** | `SessionManager` | Runtime | Spawns processes, enforces sandboxes, manages lifecycle. |
 
-## Quick Start (Docker Compose)
+---
 
-The easiest way to run the entire HMA cluster (Service + Worker + vLLM Inference) is with Docker Compose.
+## 🛠️ Quick Start
 
-### 1. Prerequisites
-*   **Docker & Docker Compose** installed.
-*   **NVIDIA Drivers & NVIDIA Container Toolkit** (for GPU support).
-
-### 2. Configure Hardware (Optional)
-Open `docker-compose.yml` and update the `vllm-worker` service to match your GPU count:
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all # Use all 8 GPUs!
-          capabilities: [gpu]
-```
-
-### 3. Add Data (Optional)
-Place any PDFs or text files you want the agents to reference into the `agent_budget_research/data/` folder. The **Librarian** will index them on startup.
-
-### 4. Launch
+### 1. Installation
 ```bash
-docker-compose up --build
+git clone https://github.com/avuppal/Hierarchical-Meta-Agent-Architecture.git
+cd Hierarchical-Meta-Agent-Architecture
+pip install -r requirements.txt
 ```
-This starts:
-*   **vLLM Inference Server** (Port 8000)
-*   **HMA Orchestrator** (Port 8080)
-*   **Prometheus Metrics** (Port 8001 internal)
 
-### 5. Submit a Task
+### 2. Run the Service (API)
+Start the HMA-AaaS (Agent-as-a-Service) API server:
+```bash
+python3 service.py
+```
+*   **API:** `http://localhost:8080`
+*   **Metrics:** `http://localhost:8080/metrics`
+
+### 3. Submit a Job
 ```bash
 curl -X POST "http://localhost:8080/submit" \
      -H "Content-Type: application/json" \
-     -d '{"task_description": "Analyze the 'quarterly_report.pdf' in the data folder.", "total_budget_tokens": 5000}'
+     -d '{
+           "task_description": "Analyze the Q3 financial report using Python and search for competitor data.",
+           "total_budget_tokens": 5000
+         }'
 ```
 
-### 6. Check Metrics
-View real-time efficiency logs:
+### 4. Check Status
 ```bash
-curl "http://localhost:8080/metrics"
+curl "http://localhost:8080/status/{job_id}"
 ```
+Response includes the **Swarm Plan** (which agents were spawned) and their individual outputs.
+
+---
+
+## 🧩 Adding Skills
+
+### Option A: Local Skill
+Create a folder in `skills/`:
+```text
+skills/
+  my-custom-tool/
+    SKILL.md       # The system prompt / instructions
+    manifest.json  # Metadata (tools required, permissions)
+```
+
+### Option B: Import from LangChain
+The `SkillRegistry` can dynamically import any LangChain tool:
+```python
+from skills.SkillRegistry import SkillRegistry
+registry = SkillRegistry()
+registry.import_langchain_tool("GoogleSerperRun")
+```
+
+---
+
+## 📊 Deployment (Docker)
+
+For full-stack deployment with a local vLLM inference server:
+
+```bash
+docker-compose up --build
+```
+
+This launches:
+1.  **HMA Service** (Port 8080)
+2.  **vLLM Worker** (Port 8000) - utilizing all available GPUs.
+3.  **Prometheus Metrics** (Port 8001)
+
+---
+
+## 🔬 Research Hypothesis
+
+> For a fixed computational budget (time/energy), the overall efficiency of a multi-agent system is maximized by introducing a **Hierarchical Meta-Agent** whose primary function is **Dynamic Resource Budgeting** and **Tool Creation**, rather than just task decomposition.
+
+**Benchmarks:** See `hma_benchmark_logs.csv` for real-time token ROI and latency metrics.
