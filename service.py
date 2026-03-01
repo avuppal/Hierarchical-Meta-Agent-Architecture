@@ -32,22 +32,24 @@ def run_hma_background(job_id: str, task_desc: str, budget: int):
     initial_state = {
         "task_description": task_desc,
         "total_budget_tokens": budget,
-        "tokens_spent": 0,
-        "worker_status": "IDLE",
-        "successful": False
+        "task_waves": [],        # Initialize empty waves for the Architect to fill
+        "current_wave_index": 0, # Start at wave 0
+        "worker_outputs": {},    # Store outputs
+        "worker_status": "IDLE"
     }
     
     try:
         # Run the LangGraph application
+        # The Architect will populate 'task_waves' in the first step
         config = {"configurable": {"recursion_limit": 20}}
         final_state = hma_app.invoke(initial_state, config=config)
         
         # Extract results
+        # We now include the 'task_waves' to show WHAT the swarm did
         result_summary = {
             "final_status": final_state.get("worker_status", "UNKNOWN"),
-            "tokens_spent": final_state.get("tokens_spent", 0),
-            "meta_review": final_state.get("meta_review", ""),
-            "worker_output": final_state.get("worker_output", "")
+            "swarm_plan": final_state.get("task_waves", []),  # <--- VISIBILITY
+            "outputs": final_state.get("worker_outputs", {})   # <--- RESULTS
         }
         
         JOB_STORE[job_id]["status"] = "COMPLETED"
