@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 
 # Import the HMA logic
 from hma_orchestrator import app as hma_app, GraphState
+from core.SecurityManager import security_manager
 
 app = FastAPI(title="Hierarchical Meta-Agent Service (HMA-AaaS)")
 
@@ -65,13 +66,20 @@ def run_hma_background(job_id: str, task_desc: str, budget: int):
 @app.post("/submit", response_model=TaskResponse)
 async def submit_task(request: TaskRequest, background_tasks: BackgroundTasks):
     """Submit a task to the HMA cluster."""
+    # Security checks: Rate limiting and input sanitization
+    client_ip = "127.0.0.1"  # In production, extract from request headers
+    if not security_manager.check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    sanitized_task = security_manager.sanitize_input(request.task_description)
+    
     job_id = str(uuid.uuid4())
     
     # Initialize job in store
     JOB_STORE[job_id] = {
         "id": job_id,
         "status": "QUEUED",
-        "task": request.task_description,
+        "task": sanitized_task,
         "budget": request.total_budget_tokens,
         "submitted_at": time.time()
     }
@@ -80,7 +88,7 @@ async def submit_task(request: TaskRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(
         run_hma_background, 
         job_id, 
-        request.task_description, 
+        sanitized_task, 
         request.total_budget_tokens
     )
     

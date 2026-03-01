@@ -24,6 +24,7 @@ try:
     from core.SessionManager import SessionManager
     from core.QueueManager import queue_manager
     from core.BottleneckDetector import bottleneck_detector
+    from core.HITLManager import hitl_manager
 except ImportError:
     # Fallback for when running without the full package structure
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +33,7 @@ except ImportError:
     from core.SessionManager import SessionManager
     from core.QueueManager import queue_manager
     from core.BottleneckDetector import bottleneck_detector
+    from core.HITLManager import hitl_manager
 
 # --- THE LIBRARIAN (RAG) ---
 DATA_DIR = "data"
@@ -57,7 +59,7 @@ class LibrarianRAG:
                     reader = PdfReader(path)
                     for page in reader.pages: text += page.extract_text() + "\n"
                 except: pass
-            
+
             if text:
                 chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
                 ids = [f"{f}_{i}" for i in range(len(chunks))]
@@ -75,9 +77,9 @@ class LibrarianRAG:
 librarian = LibrarianRAG()
 
 # --- Configuration Constants ---
-VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1") 
-VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY") 
-VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m") 
+VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY")
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "facebook/opt-125m")
 
 # Configure DSPy
 lm = dspy.LM(model=f"openai/{VLLM_MODEL_NAME}", api_base=VLLM_API_BASE, api_key=VLLM_API_KEY)
@@ -160,11 +162,11 @@ async def analyst_wave_planner(state: GraphState) -> dict:
     Uses the AgentArchitect (Cortex) to design the swarm.
     """
     print("--- [Architect]: Designing Swarm ---")
-    
+
     # Cache Check
     cache_key = f"ARCHITECT:{state['task_description']}"
     cached = semantic_cache.get(cache_key)
-    if cached: 
+    if cached:
         print("  [Cache Hit]")
         return cached
 
@@ -178,19 +180,29 @@ async def analyst_wave_planner(state: GraphState) -> dict:
     architect = AgentArchitect()
     swarm_plan = architect.design_swarm(state['task_description'])
 
+    # NEW: HITL Checkpoint for critical tasks
+    agents = swarm_plan.get("agents", [])
+    requires_approval = any(hitl_manager.check_critical_task(agent["task"], agent["skill"]) for agent in agents)
+
+    if requires_approval:
+        # Use job_id from state if available, else simulate
+        job_id = state.get("job_id", "unknown")
+        approved = await hitl_manager.request_approval(job_id, state['task_description'], swarm_plan)
+        if not approved:
+            raise ValueError("Task denied by human-in-the-loop")
+
     duration = (time.time() - start) * 1000
     logger.log("ARCHITECT", duration, "SUCCESS")
 
     # Update forecasting with actual duration
     forecasting_engine.update_history("architect", duration, "SUCCESS")
-    
+
     # Convert Swarm Plan to "Waves" format for compatibility with existing graph
     # The Architect returns {"strategy": "parallel", "agents": [...]}
     # We treat the list of agents as a single parallel wave for now.
-    
-    agents = swarm_plan.get("agents", [])
+
     current_wave = []
-    
+
     for agent in agents:
         current_wave.append({
             "description": agent["task"],
@@ -198,11 +210,11 @@ async def analyst_wave_planner(state: GraphState) -> dict:
             "role": agent["role"],
             "tools": agent.get("tools", [])
         })
-        
-    # If strategy is sequential, we might want to split into multiple waves, 
+
+    # If strategy is sequential, we might want to split into multiple waves,
     # but for this integration we'll just queue them in one wave list for dispatch
     waves = [current_wave]
-    
+
     new_state = {"task_waves": waves, "current_wave_index": 0}
     semantic_cache.set(cache_key, new_state)
     return new_state
@@ -214,13 +226,13 @@ async def dispatch_wave(state: GraphState) -> dict:
 async def execute_wave_tasks(state: GraphState) -> dict:
     current_wave = state['task_waves'][state['current_wave_index']]
     print(f"--- Wave {state['current_wave_index']} ({len(current_wave)} tasks) ---")
-    
+
     # NEW: Use SessionManager for execution
     session_manager = SessionManager()
-    
+
     # For simulation/asyncio compatibility, we'll wrap the SessionManager calls
     # In a real deployed version, SessionManager might handle async internally or via API
-    
+
     async def run_agent_task(agent_def):
         start_time = time.time()
         role = agent_def.get("role", "worker")
@@ -271,12 +283,12 @@ async def execute_wave_tasks(state: GraphState) -> dict:
 
     tasks = [run_agent_task(agent) for agent in current_wave]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     outputs = {}
     for i, res in enumerate(results):
         desc = current_wave[i]['description']
         outputs[desc] = str(res)
-            
+
     return {
         "worker_outputs": {**state.get('worker_outputs', {}), **outputs},
         "current_wave_index": state['current_wave_index'] + 1,
