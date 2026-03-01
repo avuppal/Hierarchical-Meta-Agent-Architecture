@@ -15,11 +15,14 @@ services:
       - HMA_API_BASE=http://vllm-worker:8000/v1
       - HMA_API_KEY=EMPTY
       - HMA_MODEL_NAME=facebook/opt-125m
+      # Concurrency Limit for Rate Limiting
+      - MAX_CONCURRENT_WORKERS=32
     depends_on:
       - vllm-worker
     volumes:
       # Persist benchmark logs to host
       - ./hma_benchmark_logs.csv:/app/hma_benchmark_logs.csv
+      - ./hma_semantic_cache_db:/app/hma_semantic_cache_db
 
   vllm-worker:
     image: vllm/vllm-openai:latest
@@ -33,8 +36,16 @@ services:
               capabilities: [gpu]
     ports:
       - "8000:8000"
-    # Benchmark with a small model by default. Change to larger models for real tests.
-    command: --model facebook/opt-125m --gpu-memory-utilization 0.90 --max-model-len 2048
+    # OPTIMIZATION FLAGS:
+    # 1. --enable-prefix-caching: Reuses KV cache for system prompts (Huge latency win)
+    # 2. --gpu-memory-utilization: Maximize VRAM usage
+    # 3. Speculative Decoding (Optional): Add --speculative-model [small-model] if using a large main model
+    command: >
+      --model facebook/opt-125m
+      --gpu-memory-utilization 0.90
+      --max-model-len 2048
+      --enable-prefix-caching
+      --disable-log-stats
     volumes:
       # Cache models so they don't download every restart
       - ~/.cache/huggingface:/root/.cache/huggingface

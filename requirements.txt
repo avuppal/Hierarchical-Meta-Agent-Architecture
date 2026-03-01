@@ -9,4 +9,5 @@ prometheus-client
 tenacity
 chromadb
 sentence-transformers
+dspy-ai
 pyright>=1.1.338
