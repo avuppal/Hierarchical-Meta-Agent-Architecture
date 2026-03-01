@@ -10,38 +10,33 @@ This repository contains the research codebase for testing the efficiency of **H
 
 This system implements key industrial management theories to optimize AI Token Efficiency:
 
-1.  **Analyst Node (Context Compression & Planning):**
-    *   **Theory:** MECE (Mutually Exclusive, Collectively Exhaustive).
-    *   **Function:** Rewrites user prompts into strict technical briefs and plans **Parallel Execution Waves** (Dependency-Aware DAG).
-    *   **Benefit:** Reduces noise and plans optimal parallel routes.
+1.  **DSPy Cognitive Layer (Self-Improving Prompts):**
+    *   **Theory:** Optimization over Heuristics.
+    *   **Function:** Replaces brittle hand-written prompts with **DSPy Signatures** (Analyst, Worker, Engineer). Allows the system to *compile* optimized prompts based on performance metrics.
+    *   **Benefit:** Higher accuracy with fewer tokens (Prompt Optimization).
 
-2.  **The Engineer (Dynamic Tool Creation):**
+2.  **The Librarian (RAG / Knowledge Management):**
+    *   **Theory:** Grounded Truth.
+    *   **Function:** Automatically indexes local documents (PDFs, Text) in the `data/` folder into ChromaDB. Agents can trigger a "RESEARCH" task to query this private knowledge base.
+    *   **Benefit:** Eliminates hallucination on internal data.
+
+3.  **The Engineer (Dynamic Tool Creation):**
     *   **Theory:** Make vs. Buy Decision.
     *   **Function:** Automatically detects computational tasks (Math/Data) and writes/executes **Python Code** in a sandbox instead of using LLM reasoning.
-    *   **Benefit:** 100x efficiency for math/logic. Solves problems the model cannot hallucinate through.
+    *   **Benefit:** 100x efficiency for math/logic.
 
-3.  **Strategic Alignment (The Golden Thread):**
-    *   **Theory:** Principal-Agent Problem Resolution.
-    *   **Function:** Injects the **Global Objective** into every sub-agent's prompt context.
-    *   **Benefit:** Prevents strategic drift. Workers execute sub-tasks without losing sight of the original mission.
+4.  **Vector Semantic Cache (Collective Memory):**
+    *   **Theory:** Memoization.
+    *   **Function:** Stores vector embeddings of every sub-agent interaction. If a similar problem arises, the solution is retrieved instantly.
+    *   **Benefit:** "Skill Acquisition." Cost drops to **Zero Tokens** for repeated tasks.
 
-4.  **Drift Detection (Lean Safeguards):**
-    *   **Theory:** Statistical Process Control (SPC).
-    *   **Function:** Uses **Vector Cosine Similarity** (Zero Token Cost) to compare sub-agent outputs against the Global Goal. Triggers automatic re-alignment warnings if drift is detected.
-    *   **Benefit:** Self-healing system that corrects course without human intervention.
-
-5.  **Vector Semantic Cache (Collective Memory):**
-    *   **Theory:** Knowledge Management (KM).
-    *   **Function:** Uses **ChromaDB** to store vector embeddings of *every* sub-agent prompt and result.
-    *   **Benefit:** "Skill Acquisition." If an agent solves a problem once, the solution is memorized forever. Subsequent similar requests cost **Zero Tokens**.
-
-6.  **Parallel Execution Engine (HPC Optimization):**
+5.  **Parallel Execution Engine (HPC Optimization):**
     *   **Theory:** Amdahl's Law.
     *   **Function:** Uses `asyncio.gather` to fire all tasks in a wave simultaneously, leveraging vLLM's continuous batching on 8x GPUs.
 
 ## Structure
 
-*   **`hma_orchestrator.py`**: The Async LangGraph engine implementing the HMA logic (Analyst -> Parallel Waves -> Engineer/Worker -> Reduce).
+*   **`hma_orchestrator.py`**: The Async LangGraph engine implementing the HMA logic with DSPy modules.
 *   **`service.py`**: FastAPI wrapper exposing the HMA as a scalable "Agent-as-a-Service" (AaaS).
 *   **`docker-compose.yml`**: Full-stack deployment (HMA Service + vLLM Worker).
 *   **`hma_benchmark_logs.csv`**: Automatically generated metrics file tracking Token ROI and Latency.
@@ -66,7 +61,10 @@ deploy:
           capabilities: [gpu]
 ```
 
-### 3. Launch
+### 3. Add Data (Optional)
+Place any PDFs or text files you want the agents to reference into the `agent_budget_research/data/` folder. The **Librarian** will index them on startup.
+
+### 4. Launch
 ```bash
 docker-compose up --build
 ```
@@ -75,14 +73,14 @@ This starts:
 *   **HMA Orchestrator** (Port 8080)
 *   **Prometheus Metrics** (Port 8001 internal)
 
-### 4. Submit a Task
+### 5. Submit a Task
 ```bash
 curl -X POST "http://localhost:8080/submit" \
      -H "Content-Type: application/json" \
-     -d '{"task_description": "Calculate the sum of the first 100 prime numbers using Python.", "total_budget_tokens": 5000}'
+     -d '{"task_description": "Analyze the 'quarterly_report.pdf' in the data folder.", "total_budget_tokens": 5000}'
 ```
 
-### 5. Check Metrics
+### 6. Check Metrics
 View real-time efficiency logs:
 ```bash
 curl "http://localhost:8080/metrics"
