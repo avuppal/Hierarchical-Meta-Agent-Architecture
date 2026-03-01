@@ -11,6 +11,8 @@ import asyncio
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
+import chromadb
+from chromadb.utils import embedding_functions
 
 # --- Configuration Constants ---
 VLLM_API_BASE = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1") 
@@ -22,7 +24,7 @@ HMA_API_KEY = os.getenv("HMA_API_KEY", "EMPTY")
 HMA_MODEL_NAME = os.getenv("HMA_MODEL_NAME", "facebook/opt-125m") 
 
 BENCHMARK_FILE = "hma_benchmark_logs.csv"
-CACHE_FILE = "hma_semantic_cache.json"
+CHROMA_DB_PATH = "hma_semantic_cache_db"
 
 # Rate Limiting (Semaphore)
 MAX_CONCURRENT_WORKERS = int(os.getenv("MAX_CONCURRENT_WORKERS", "20"))
@@ -66,27 +68,57 @@ class BenchmarkLogger:
 
 logger = BenchmarkLogger()
 
-# --- 3. Semantic Cache ---
-class SemanticCache:
-    def __init__(self, filename=CACHE_FILE):
-        self.filename = filename
-        self.cache = {}
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f:
-                    self.cache = json.load(f)
-            except:
-                self.cache = {}
+# --- 3. Vector Semantic Cache (KM Layer) ---
+class VectorSemanticCache:
+    def __init__(self, path=CHROMA_DB_PATH):
+        self.client = chromadb.PersistentClient(path=path)
+        # Use default embedding function (all-MiniLM-L6-v2) - lightweight & local
+        self.ef = embedding_functions.DefaultEmbeddingFunction()
+        self.collection = self.client.get_or_create_collection(
+            name="hma_cache", 
+            embedding_function=self.ef,
+            metadata={"hnsw:space": "cosine"}
+        )
 
-    def get(self, key: str) -> Optional[dict]:
-        return self.cache.get(key)
+    def get(self, query_text: str, threshold: float = 0.92) -> Optional[dict]:
+        """Search cache for semantically similar prompts."""
+        try:
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=1
+            )
+            
+            if not results['documents'] or not results['documents'][0]:
+                return None
+                
+            # Check similarity distance (lower is better for cosine distance in Chroma? No, Chroma uses L2 by default unless specified)
+            # Actually, let's assume if it returns a result, we check distance.
+            distance = results['distances'][0][0]
+            # Threshold logic depends on metric. Let's assume cosine distance: 0=identical, 2=opposite.
+            # A rigorous semantic match is usually < 0.1 or 0.2 depending on embedding model.
+            # Let's use a strict threshold.
+            if distance < (1 - threshold): 
+                cached_data = json.loads(results['metadatas'][0][0]['response_json'])
+                print(f"  [Vector Cache Hit] Distance: {distance:.4f} (Threshold: {1-threshold})")
+                return cached_data
+        except Exception as e:
+            print(f"Cache Query Error: {e}")
+        return None
 
-    def set(self, key: str, value: dict):
-        self.cache[key] = value
-        with open(self.filename, 'w') as f:
-            json.dump(self.cache, f, indent=2)
+    def set(self, query_text: str, response_data: dict):
+        """Store prompt and response in vector DB."""
+        try:
+            # Create a unique ID based on hash of text to prevent dupes
+            doc_id = hashlib.sha256(query_text.encode()).hexdigest()
+            self.collection.upsert(
+                documents=[query_text],
+                metadatas=[{"response_json": json.dumps(response_data)}],
+                ids=[doc_id]
+            )
+        except Exception as e:
+            print(f"Cache Set Error: {e}")
 
-semantic_cache = SemanticCache()
+semantic_cache = VectorSemanticCache()
 
 # --- 4. State Schema ---
 class AgentBudgetState(BaseModel):
@@ -122,12 +154,13 @@ class GraphState(TypedDict):
     retry=retry_if_exception_type(Exception)
 )
 async def call_llm_async(api_base, api_key, model, prompt, system_prompt="You are a helpful assistant."):
-    """Robust Async helper with Retry, Cache, and Semaphore."""
+    """Robust Async helper with Retry, Vector Cache, and Semaphore."""
     
-    cache_key = hashlib.sha256(f"{model}:{system_prompt}:{prompt}".encode()).hexdigest()
-    cached = semantic_cache.get(cache_key)
+    # Check Vector Cache
+    # Combine system + prompt for semantic key
+    semantic_key = f"{system_prompt}\n\n{prompt}"
+    cached = semantic_cache.get(semantic_key)
     if cached:
-        print(f"  [Cache Hit] Serving response from {CACHE_FILE}")
         return cached['content'], cached['usage'], 0.0 
     
     # Use Semaphore for Rate Limiting
@@ -147,13 +180,15 @@ async def call_llm_async(api_base, api_key, model, prompt, system_prompt="You ar
             duration = (time.time() - start_time) * 1000
             content = response.choices[0].message.content
             usage = response.usage.model_dump()
-            semantic_cache.set(cache_key, {'content': content, 'usage': usage})
+            
+            # Store in Vector Cache
+            semantic_cache.set(semantic_key, {'content': content, 'usage': usage})
             
             return content, usage, duration
         except Exception as e:
             print(f"API Error (Retrying): {e}")
             HMA_WORKER_ERRORS.labels(error_type=type(e).__name__).inc()
-            raise e # Trigger Retry
+            raise e 
 
 def extract_json(text: str) -> dict:
     try: return json.loads(text)
@@ -203,7 +238,6 @@ async def analyst_wave_planner(state: GraphState) -> dict:
         waves = data.get("waves", [[raw_task]]) 
         complexity = data.get("complexity", "MEDIUM")
     except Exception as e:
-        # Fallback if Analyst fails completely
         print(f"Analyst Failed: {e}. Fallback to single task.")
         waves = [[raw_task]]
         complexity = "MEDIUM"
@@ -245,15 +279,19 @@ async def execute_wave_tasks(state: GraphState) -> dict:
         instruction = "Think step-by-step." if use_cot else "Be concise."
         context_str = "\n".join([f"- {k}: {v[:100]}..." for k, v in state.get('worker_outputs', {}).items()])
         
+        # REFLEXION UPGRADE: Add critique step instruction
         prompt = f"""
         Task: {task}
         Context from previous steps:
         {context_str}
         
-        Instruction: {instruction} Provide a structured response.
+        Instruction: {instruction} 
+        First, draft your response. Then, critique it for accuracy. Finally, output the BEST version.
+        Provide a structured response.
         OUTPUT FORMAT: STRICT JSON ONLY.
         {{
-            "content": "...",
+            "critique": "Self-correction notes...",
+            "content": "The final, polished work...",
             "status": "complete"
         }}
         """
@@ -265,7 +303,6 @@ async def execute_wave_tasks(state: GraphState) -> dict:
         ))
     
     print(f"  -> Firing {len(async_tasks)} concurrent requests to vLLM...")
-    # Use gather with return_exceptions=True to prevent one failure from crashing the batch
     results = await asyncio.gather(*async_tasks, return_exceptions=True)
     
     outputs = {}\n    total_cost = 0\n    \n    for i, result in enumerate(results):\n        task_name = task_names[i]\n        if isinstance(result, Exception):\n            print(f\"Worker Failed for {task_name}: {result}\")\n            outputs[task_name] = f\"ERROR: {str(result)}\"\n            HMA_WORKER_ERRORS.labels(error_type=\"TaskFailure\").inc()\n            continue\n            \n        content, usage, duration = result\n        data = extract_json(content)\n        final_output = data.get(\"content\", content)\n        outputs[task_name] = final_output\n        total_cost += usage.get('total_tokens', 0)\n        logger.log(\"WORKER_EXECUTION\", duration, usage, \"SUCCESS\", content)\n\n    print(f\"Wave {state['current_wave_index'] + 1} Complete. Cost: {total_cost} tokens.\")\n    \n    return {\n        \"worker_outputs\": {**state.get('worker_outputs', {}), **outputs},\n        \"tokens_spent\": state['tokens_spent'] + total_cost,\n        \"current_wave_index\": state['current_wave_index'] + 1,\n        \"worker_status\": \"READY_TO_DISPATCH\"\n    }\n\nasync def final_review(state: GraphState) -> dict:\n    print(\"--- [HMA Controller]: Final Review & Synthesis ---\")\n    \n    all_work = json.dumps(state['worker_outputs'], indent=2)\n    prompt = f\"\"\"\n    You are the Meta-Agent Manager.\n    Original Goal: {state['task_description']}\n    Completed Work:\n    {all_work}\n    \n    Synthesize this into a final report.\n    \"\"\"\n    \n    try:\n        content, usage, duration = await call_llm_async(\n            HMA_API_BASE, HMA_API_KEY, HMA_MODEL_NAME,\n            prompt=prompt,\n            system_prompt=\"You are a strict Project Manager.\"\n        )\n        logger.log(\"HMA_FINAL_REVIEW\", duration, usage, \"SUCCESS\", content)\n        return {\n            \"meta_review\": content,\n            \"tokens_spent\": state['tokens_spent'] + usage.get('total_tokens', 0),\n            \"successful\": True\n        }\n    except Exception as e:\n        print(f\"Final Review Failed: {e}\")\n        return {\"meta_review\": \"Synthesis Failed\", \"successful\": False}\n\n# --- 7. Build the Graph ---\nworkflow = StateGraph(GraphState)\n\nworkflow.add_node(\"analyst_wave_planner\", analyst_wave_planner)\nworkflow.add_node(\"dispatch_wave\", dispatch_wave)\nworkflow.add_node(\"execute_wave_tasks\", execute_wave_tasks)\nworkflow.add_node(\"final_review\", final_review)\n\nworkflow.set_entry_point(\"analyst_wave_planner\")\nworkflow.add_edge(\"analyst_wave_planner\", \"dispatch_wave\")\n\nworkflow.add_conditional_edges(\n    \"dispatch_wave\",\n    lambda state: state['worker_status'],\n    {\n        \"EXECUTING_WAVE\": \"execute_wave_tasks\",\n        \"COMPLETE\": \"final_review\"\n    }\n)\n\nworkflow.add_edge(\"execute_wave_tasks\", \"dispatch_wave\") \nworkflow.add_edge(\"final_review\", END)\n\napp = workflow.compile()\n\nif __name__ == \"__main__\":\n    print(f\"Starting HMA Enterprise Benchmark.\")\n    initial_state = {\n        \"task_description\": \"Compare SSM vs Transformer architectures.\",\n        \"total_budget_tokens\": 5000, \n    }\n    \n    async def main():\n        # Start Prometheus metrics server for local testing\n        # start_http_server(8001) \n        \n        config = {\"configurable\": {\"recursion_limit\": 20}}\n        try:\n            async for step in app.astream(initial_state, config=config):\n                for key in step: print(f\"  -> Finished Node: {key}\")\n        except Exception as e:\n            print(f\"Graph Execution Failed: {e}\")\n            \n    asyncio.run(main())",

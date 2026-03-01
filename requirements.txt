@@ -7,4 +7,6 @@ fastapi
 uvicorn
 prometheus-client
 tenacity
+chromadb
+sentence-transformers
 pyright>=1.1.338
