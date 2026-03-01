@@ -20,18 +20,24 @@ This system implements key industrial management theories to optimize AI Token E
     *   **Function:** Automatically detects computational tasks (Math/Data) and writes/executes **Python Code** in a sandbox instead of using LLM reasoning.
     *   **Benefit:** 100x efficiency for math/logic. Solves problems the model cannot hallucinate through.
 
-3.  **Vector Semantic Cache (Collective Memory):**
+3.  **Strategic Alignment (The Golden Thread):**
+    *   **Theory:** Principal-Agent Problem Resolution.
+    *   **Function:** Injects the **Global Objective** into every sub-agent's prompt context.
+    *   **Benefit:** Prevents strategic drift. Workers execute sub-tasks without losing sight of the original mission.
+
+4.  **Drift Detection (Lean Safeguards):**
+    *   **Theory:** Statistical Process Control (SPC).
+    *   **Function:** Uses **Vector Cosine Similarity** (Zero Token Cost) to compare sub-agent outputs against the Global Goal. Triggers automatic re-alignment warnings if drift is detected.
+    *   **Benefit:** Self-healing system that corrects course without human intervention.
+
+5.  **Vector Semantic Cache (Collective Memory):**
     *   **Theory:** Knowledge Management (KM).
     *   **Function:** Uses **ChromaDB** to store vector embeddings of *every* sub-agent prompt and result.
     *   **Benefit:** "Skill Acquisition." If an agent solves a problem once, the solution is memorized forever. Subsequent similar requests cost **Zero Tokens**.
 
-4.  **Parallel Execution Engine (HPC Optimization):**
+6.  **Parallel Execution Engine (HPC Optimization):**
     *   **Theory:** Amdahl's Law.
     *   **Function:** Uses `asyncio.gather` to fire all tasks in a wave simultaneously, leveraging vLLM's continuous batching on 8x GPUs.
-
-5.  **Reflexion & Poka-Yoke:**
-    *   **Theory:** Quality Engineering.
-    *   **Function:** Workers self-correct (Draft -> Critique -> Refine) and output strictly validated JSON.
 
 ## Structure
 
